@@ -1,67 +1,91 @@
--- ============================================================================
--- 帝樂倉存系統 · Supabase 建置 SQL（最終整合版 · row-level）
--- 喺 Supabase → SQL Editor 貼上並執行（一次過）。
---
--- 儲存模型（見 inventory/DATABASE.md）：每份文件一行，data 係 jsonb。
---   collection = 'orders'/'products'/'settings'…；singleton 用 doc_id='_doc'。
--- 逐行 upsert → 兩個人改「不同記錄」互不覆蓋（並發安全）；支援動態欄位。
--- ============================================================================
+/* Module: 篩具計數 (req 8) — daily sieve intake, periodic returns, outstanding counter */
+(function (root) {
+  'use strict';
+  var UI = root.UI, Store = root.Store, Biz = root.Biz, el = UI.el;
 
-create table if not exists public.inventory_docs (
-  collection  text        not null,
-  doc_id      text        not null,          -- 文件 id；singleton 用 '_doc'
-  data        jsonb       not null default '{}'::jsonb,
-  deleted     boolean     not null default false,
-  updated_at  timestamptz not null default now(),
-  primary key (collection, doc_id)
-);
+  function render(container) {
+    var right = el('div', { class: 'flex gap-2 flex-wrap' }, [
+      UI.iconBtn('＋ 到貨篩（入）', 'primary', function () { entry('in', container); }),
+      UI.iconBtn('↩ 回篩（還）', 'accent', function () { entry('return', container); })
+    ]);
+    container.innerHTML = '';
+    container.appendChild(UI.sectionTitle('篩具計數', '記錄每日到貨嘅篩，追蹤未回篩數量', right));
 
-create index if not exists inv_docs_collection_idx on public.inventory_docs (collection) where not deleted;
+    var balance = Biz.sieveBalance();
+    var totalOut = Biz.sieveTotalOutstanding();
 
-alter table public.inventory_docs enable row level security;
+    // big counter
+    container.appendChild(el('div', { class: 'bg-indigo text-rice-paper p-6 mb-6 flex items-center justify-between flex-wrap gap-4' }, [
+      el('div', {}, [
+        el('p', { class: 'text-rice-paper/70 text-sm uppercase tracking-wide', text: '未回篩總數 Outstanding sieves' }),
+        el('p', { class: 'font-serif text-5xl', text: String(totalOut) })
+      ]),
+      el('p', { class: 'text-rice-paper/60 text-sm max-w-xs', text: '此數 = 累計到貨篩數 − 已回篩數。定期回篩後於此更新。' })
+    ]));
 
--- ---------------------------------------------------------------------------
--- 方案 A（預設・建議）：只有「已登入」用戶可讀寫。配合前端 Email/密碼登入。
--- ---------------------------------------------------------------------------
-drop policy if exists "inv_docs_auth_all" on public.inventory_docs;
-create policy "inv_docs_auth_all"
-  on public.inventory_docs
-  for all
-  to authenticated
-  using (auth.uid() is not null)
-  with check (auth.uid() is not null);
+    // per supplier
+    var cols = [
+      { label: '供應商', render: function (r) { return '<b>' + r.supplier + '</b>'; } },
+      { label: '到貨篩總數', class: 'text-right', render: function (r) { return String(r.inQty); } },
+      { label: '已回篩', class: 'text-right', render: function (r) { return String(r.returnQty); } },
+      { label: '未回篩', class: 'text-right', render: function (r) { return '<span class="' + (r.outstanding > 0 ? 'text-terracotta font-bold' : 'text-emerald-600') + '">' + r.outstanding + '</span>'; } },
+      { label: '操作', class: 'text-right', render: function (r) {
+        return el('button', { class: 'text-terracotta hover:underline text-xs', text: '回篩', onclick: function () { entry('return', container, r.supplier); } });
+      } }
+    ];
+    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4 mb-6' }, [
+      el('h3', { class: 'font-serif text-lg text-indigo mb-3', text: '各供應商結存' }),
+      UI.table(cols, balance, { empty: '未有篩具紀錄。' })
+    ]));
 
--- ---------------------------------------------------------------------------
--- 方案 B（免登入・唔建議放敏感資料）：任何持 anon key 者可讀寫。
--- 要用先喺前端設定剔「改用 anon 免登入」，並改用以下 policy（先移除方案 A）：
--- ---------------------------------------------------------------------------
--- drop policy if exists "inv_docs_auth_all" on public.inventory_docs;
--- create policy "inv_docs_anon_all"
---   on public.inventory_docs for all to anon using (true) with check (true);
+    // ledger
+    var log = Store.all('sieveLog').slice().sort(function (a, b) { return (b.date || '').localeCompare(a.date || '') || (b.createdAt || '').localeCompare(a.createdAt || ''); });
+    var logCols = [
+      { label: '日期', render: function (e) { return UI.fmtDate(e.date); } },
+      { label: '類型', render: function (e) { return e.type === 'in' ? UI.badge('到貨 IN', 'info') : UI.badge('回篩 RETURN', 'ok'); } },
+      { label: '供應商', render: function (e) { return e.supplierName || '—'; } },
+      { label: '數量', class: 'text-right', render: function (e) { return (e.type === 'in' ? '+' : '−') + e.qty; } },
+      { label: '備註', render: function (e) { return e.note || '—'; } },
+      { label: '', class: 'text-right', render: function (e) { return el('button', { class: 'text-red-600 hover:underline text-xs', text: '刪', onclick: function () { UI.confirmModal('刪除此紀錄？', function () { Store.remove('sieveLog', e.id); render(container); }, { danger: true }); } }); } }
+    ];
+    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4' }, [
+      el('h3', { class: 'font-serif text-lg text-indigo mb-3', text: '篩具流水紀錄' }),
+      UI.table(logCols, log, { empty: '未有紀錄。' })
+    ]));
+  }
 
--- ---------------------------------------------------------------------------
--- Realtime：多機即時同步。
--- ---------------------------------------------------------------------------
-alter publication supabase_realtime add table public.inventory_docs;
+  function entry(type, container, presetSupplier) {
+    var suppliers = {};
+    Store.all('products').forEach(function (p) { if (p.supplierName) suppliers[p.supplierName] = 1; });
+    Store.all('sieveLog').forEach(function (e) { if (e.supplierName) suppliers[e.supplierName] = 1; });
+    var supList = Object.keys(suppliers);
 
--- 自動更新 updated_at
-create or replace function public.inv_touch_updated_at()
-returns trigger language plpgsql as $$
-begin new.updated_at = now(); return new; end; $$;
+    var body = el('div', {}, [
+      UI.grid(2, [
+        UI.field({ key: 'date', label: '日期', type: 'date', value: new Date().toISOString().slice(0, 10) }),
+        UI.field({ key: 'qty', label: type === 'in' ? '到貨篩數量' : '回篩數量', type: 'number', required: true })
+      ]),
+      UI.field({ key: 'supplierName', label: '供應商', type: supList.length ? 'select' : 'text',
+        options: supList.length ? [{ value: '', label: '— 選 —' }].concat(supList.map(function (x) { return { value: x, label: x }; })) : null,
+        value: presetSupplier || '' }),
+      UI.field({ key: 'note', label: '備註', type: 'text' })
+    ]);
 
-drop trigger if exists inv_docs_touch on public.inventory_docs;
-create trigger inv_docs_touch before update on public.inventory_docs
-  for each row execute function public.inv_touch_updated_at();
+    UI.modal({
+      title: type === 'in' ? '記錄到貨篩' : '記錄回篩', width: 'max-w-lg', body: body,
+      actions: [
+        { label: '取消', kind: 'ghost' },
+        { label: '儲存', kind: 'primary', onClick: function (close) {
+          var d = UI.readForm(body);
+          if (!d.qty || Number(d.qty) <= 0) { UI.toast('請輸入數量', 'err'); return false; }
+          Store.insert('sieveLog', { date: d.date, type: type, qty: Number(d.qty), supplierName: d.supplierName, note: d.note });
+          UI.toast('已記錄', 'ok'); close(); render(container);
+        } }
+      ]
+    });
+  }
 
--- ============================================================================
--- 建立員工帳號（方案 A）：
---   Supabase → Authentication → Users → Add user（email + 密碼）。
---   並喺 Authentication → Providers → Email 關閉「Allow new users to sign up」。
---
--- 前端設定：倉存系統 → 設定 → 雲端同步，填 Project URL 同 anon key
---   （Supabase → Project Settings → API 搵到）。
---
--- 由舊版（inventory_store，整 collection blob）升級者：
---   舊表可保留作備份；新版只用 inventory_docs。首次連線時前端會把本地資料
---   逐份文件推上新表。確認無誤後可 `drop table public.inventory_store;`。
--- ============================================================================
+  root.Modules = root.Modules || {};
+  root.Modules.sieve = { id: 'sieve', label: '篩具計數', icon: '🧺', render: render };
+
+})(typeof window !== 'undefined' ? window : this);
