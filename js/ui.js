@@ -61,7 +61,7 @@
   function modal(opts) {
     // opts: { title, body(node), width, actions:[{label,kind,onClick(close)}], onClose }
     var overlay = el('div', { class: 'fixed inset-0 z-[90] bg-black/50 flex items-start justify-center overflow-auto py-8 px-4' });
-    var box = el('div', { class: 'bg-white w-full ' + (opts.width || 'max-w-2xl') + ' shadow-2xl my-auto' });
+    var box = el('div', { class: 'bg-white w-full ' + (opts.width || 'max-w-2xl') + ' rounded-2xl shadow-2xl my-auto overflow-hidden' });
     var head = el('div', { class: 'flex items-center justify-between px-6 py-4 border-b border-indigo/10' }, [
       el('h3', { class: 'font-serif text-xl text-indigo', text: opts.title || '' }),
       el('button', { class: 'text-indigo/50 hover:text-terracotta text-2xl leading-none', html: '&times;', onclick: function () { close(); } })
@@ -84,13 +84,13 @@
   }
 
   function btnClass(kind) {
-    var base = 'px-4 py-2 text-sm font-bold transition-colors ';
+    var base = 'inline-flex items-center gap-1.5 px-4 py-2 text-sm font-bold rounded-xl transition-all duration-150 active:scale-[.97] ';
     switch (kind) {
-      case 'primary': return base + 'bg-indigo text-white hover:bg-terracotta';
-      case 'accent': return base + 'bg-terracotta text-white hover:bg-terracotta/90';
-      case 'danger': return base + 'bg-red-600 text-white hover:bg-red-700';
-      case 'ghost': return base + 'border border-indigo/20 text-indigo hover:bg-indigo/5';
-      default: return base + 'border border-indigo/20 text-indigo hover:bg-indigo/5';
+      case 'primary': return base + 'bg-indigo text-white shadow-sm hover:bg-terracotta hover:shadow-md';
+      case 'accent': return base + 'bg-terracotta text-white shadow-sm hover:bg-terracotta/90 hover:shadow-md';
+      case 'danger': return base + 'bg-red-600 text-white shadow-sm hover:bg-red-700';
+      case 'ghost': return base + 'border border-indigo/15 text-indigo bg-white hover:bg-indigo/5 hover:border-indigo/30';
+      default: return base + 'border border-indigo/15 text-indigo bg-white hover:bg-indigo/5 hover:border-indigo/30';
     }
   }
 
@@ -140,7 +140,7 @@
     ]);
   }
   function inputClass() {
-    return 'w-full border border-indigo/20 bg-white px-3 py-2 text-sm text-indigo focus:outline-none focus:border-terracotta';
+    return 'w-full border border-indigo/15 bg-rice-paper/30 rounded-xl px-3.5 py-2.5 text-sm text-indigo transition-all focus:outline-none focus:bg-white focus:border-terracotta focus:ring-2 focus:ring-terracotta/20';
   }
 
   // read all [data-key] inputs inside a container into an object
@@ -234,7 +234,7 @@
       ok: 'bg-emerald-100 text-emerald-800', warn: 'bg-amber-100 text-amber-800',
       err: 'bg-red-100 text-red-800', info: 'bg-indigo/10 text-indigo', muted: 'bg-gray-100 text-gray-600'
     };
-    return '<span class="inline-block px-2 py-0.5 text-xs font-bold rounded-sm ' + (colors[kind] || colors.info) + '">' + text + '</span>';
+    return '<span class="inline-block px-2.5 py-0.5 text-xs font-bold rounded-full ' + (colors[kind] || colors.info) + '">' + text + '</span>';
   }
 
   function sectionTitle(title, subtitle, right) {

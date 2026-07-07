@@ -25,8 +25,9 @@
         if (!m) return;
         var active = App.current === id;
         nav.appendChild(el('button', {
-          class: 'w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors ' +
-            (active ? 'bg-indigo text-rice-paper' : 'text-indigo/80 hover:bg-indigo/10'),
+          class: 'w-full flex items-center gap-3 mx-2 px-3 py-2.5 rounded-xl text-left text-sm font-medium transition-all ' +
+            (active ? 'bg-indigo text-rice-paper shadow-sm' : 'text-indigo/80 hover:bg-indigo/10'),
+          style: 'width:calc(100% - 1rem);',
           onclick: function () { App.go(id); closeMobileNav(); }
         }, [el('span', { class: 'text-lg', text: m.icon }), el('span', { text: m.label })]));
       });
