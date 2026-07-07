@@ -7,6 +7,12 @@
   var Store = root.Store;
 
   var Biz = {
+    // Lifecycle status per stock lot (operational; separate from stock-qty status).
+    LOT_STATUSES: ['來貨中', '在庫', '已出庫', '已完成', '退貨', '回貨中'],
+    lotStatusKind: function (st) {
+      return ({ '來貨中': 'warn', '在庫': 'ok', '已出庫': 'info', '已完成': 'muted', '退貨': 'err', '回貨中': 'warn' })[st] || 'muted';
+    },
+
     // ---- Stock ------------------------------------------------------------
     lotsForProduct: function (productId) {
       return Store.all('stockLots').filter(function (l) { return l.productId === productId && l.status !== 'shipped'; });

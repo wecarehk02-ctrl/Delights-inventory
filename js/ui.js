@@ -283,8 +283,8 @@
   function requireUnlock(onOk) {
     if (isUnlocked()) { onOk(); return; }
     var s = root.Store.settings();
-    if (!s.protectPasswordHash) { // no password set yet -> allow, prompt to set one
-      onOk(); return;
+    if (!s.protectPasswordHash) { // no password set -> treat as unlocked
+      unlockFor(15); onOk(); return;
     }
     var body = el('div', {}, [
       el('p', { class: 'text-sm text-indigo/70 mb-3', text: '呢啲係受保護資料，請輸入密碼解鎖（15分鐘內有效）。' }),

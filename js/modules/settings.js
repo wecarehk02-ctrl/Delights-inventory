@@ -51,6 +51,31 @@
     ]));
 
     // ---- password protection ----
+    container.appendChild(card('🔐 系統登入密碼', [
+      el('p', { class: 'text-sm text-indigo/60 mb-3', text: '設定後，開啟系統要先輸入密碼先入到（本地模式）。啟用咗雲端登入(Supabase)就用雲端帳號登入，唔需要呢個。' }),
+      (function () {
+        var pwForm = el('div', {}, [
+          UI.grid(2, [
+            UI.field({ key: 'ap1', label: s.appPasswordHash ? '新登入密碼' : '設定登入密碼', type: 'password' }),
+            UI.field({ key: 'ap2', label: '再輸入一次', type: 'password' })
+          ])
+        ]);
+        var actions = el('div', { class: 'flex gap-2 mt-2' }, [
+          UI.iconBtn('儲存登入密碼', 'primary', function () {
+            var d = UI.readForm(pwForm);
+            if (!d.ap1) { UI.toast('請輸入密碼', 'err'); return; }
+            if (d.ap1 !== d.ap2) { UI.toast('兩次密碼唔一致', 'err'); return; }
+            Store.saveSettings({ appPasswordHash: UI.simpleHash(d.ap1) });
+            UI.toast('登入密碼已設定，下次開啟需登入', 'ok'); render(container);
+          }),
+          s.appPasswordHash ? UI.iconBtn('移除登入密碼', 'ghost', function () {
+            UI.confirmModal('移除系統登入密碼？之後免登入可入。', function () { Store.saveSettings({ appPasswordHash: '' }); UI.toast('已移除', 'ok'); render(container); }, { danger: true });
+          }) : null
+        ]);
+        return el('div', {}, [pwForm, actions]);
+      })()
+    ]));
+
     container.appendChild(card('🔒 受保護標籤資料密碼', [
       el('p', { class: 'text-sm text-indigo/60 mb-3', text: '設定密碼後，標籤上嘅入/出庫時間、重量、件數、保存期、存放位置等資料需要密碼先睇到或印出。' }),
       el('p', { class: 'text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2 mb-3', text: '注意：純瀏覽器版嘅資料本質上可被有心人讀取，此密碼屬操作性遮蔽（deterrent），並非加密保護。日後接雲端後端可做真正權限控制。' }),

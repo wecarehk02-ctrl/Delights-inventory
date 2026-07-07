@@ -142,8 +142,11 @@
       UI.grid(3, [
         UI.field({ key: 'expiryDate', label: '保存期限', type: 'date', value: lot ? lot.expiryDate : '', help: '留空會依產品保存期自動計算' }),
         UI.field({ key: 'sieveCount', label: '本次篩數', type: 'number', value: lot ? lot.sieveCount : '', help: '到貨嘅篩數量' }),
-        UI.field({ key: 'deliveryAddress', label: '送貨地址(可選)', type: 'text', value: lot ? lot.deliveryAddress : '' })
-      ])
+        UI.field({ key: 'workflowStatus', label: '貨品狀態', type: 'select',
+          options: Biz.LOT_STATUSES.map(function (x) { return { value: x, label: x }; }),
+          value: lot ? (lot.workflowStatus || '在庫') : '在庫' })
+      ]),
+      UI.field({ key: 'deliveryAddress', label: '送貨地址（會印喺標籤俾司機睇）', type: 'text', value: lot ? lot.deliveryAddress : '' })
     ]);
     body.appendChild(head);
 

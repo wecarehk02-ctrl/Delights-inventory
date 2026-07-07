@@ -30,6 +30,12 @@
           onclick: function () { App.go(id); closeMobileNav(); }
         }, [el('span', { class: 'text-lg', text: m.icon }), el('span', { text: m.label })]));
       });
+      if (App.hasAppPassword && App.hasAppPassword()) {
+        nav.appendChild(el('button', {
+          class: 'w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm text-red-600 hover:bg-red-50 mt-2 border-t border-indigo/10',
+          onclick: function () { App.lock(); }
+        }, [el('span', { class: 'text-lg', text: '🔒' }), el('span', { text: '鎖定 / 登出' })]));
+      }
     }
   };
 
@@ -69,6 +75,41 @@
     if (toggle && side) toggle.addEventListener('click', function () { side.classList.toggle('-translate-x-full'); });
   }
 
+  // ---- App-level login gate (local mode) ---------------------------------
+  // Cloud mode is gated by Supabase auth. In local mode, if a system password
+  // is set (設定 → 系統登入密碼), require it before the app renders.
+  var appUnlocked = false;
+  function appAuthNeeded() {
+    var s = Store.settings();
+    return !!s.appPasswordHash && !appUnlocked;
+  }
+  function showAppLogin(onOk) {
+    var s = Store.settings();
+    var overlay = el('div', { class: 'fixed inset-0 z-[95] bg-indigo flex items-center justify-center p-6' });
+    var form = el('div', { class: 'bg-rice-paper w-full max-w-sm p-8 shadow-2xl rounded-2xl' }, [
+      el('div', { class: 'font-serif text-2xl text-indigo mb-1', text: '帝樂倉存系統' }),
+      el('p', { class: 'text-sm text-indigo/60 mb-6', text: '請輸入系統密碼登入' }),
+      UI.field({ key: 'pw', label: '密碼', type: 'password' }),
+      el('div', { class: 'mt-6' })
+    ]);
+    var wrap = form.lastChild;
+    var btn = el('button', { class: UI.btnClass('primary') + ' w-full justify-center', text: '登入' });
+    var errP = el('p', { class: 'text-sm text-red-600 mt-2 min-h-[1.2em]' });
+    wrap.appendChild(btn); wrap.appendChild(errP);
+    overlay.appendChild(form);
+    document.body.appendChild(overlay);
+    function submit() {
+      var pw = UI.readForm(form).pw || '';
+      if (UI.simpleHash(pw) === s.appPasswordHash) { appUnlocked = true; overlay.remove(); onOk(); }
+      else { errP.textContent = '密碼錯誤'; }
+    }
+    btn.addEventListener('click', submit);
+    form.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
+    setTimeout(function () { var i = form.querySelector('input'); if (i) i.focus(); }, 60);
+  }
+  App.lock = function () { appUnlocked = false; location.reload(); };
+  App.hasAppPassword = function () { return !!Store.settings().appPasswordHash; };
+
   function boot() {
     // QR self-test (fails loudly if the vendored generator is broken)
     try { root.DELIGHTS_QR.selfTest(); } catch (e) { console.error(e); }
@@ -78,7 +119,8 @@
       root.Cloud.start(function () { afterData(); });
     } else {
       Store.ensureSeed();
-      afterData();
+      if (appAuthNeeded()) showAppLogin(afterData);
+      else afterData();
     }
   }
 

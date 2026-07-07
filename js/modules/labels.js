@@ -65,8 +65,9 @@
       // Visible data — delivery address always printed
       rowVisible('送貨地址', lot.deliveryAddress || s.companyAddress),
       el('div', { class: 'lbl-grid' }, [
-        rowProtected('入庫', UI.fmtDateTime(lot.inboundTime)),
-        rowProtected('出庫', lot.outboundTime ? UI.fmtDateTime(lot.outboundTime) : '未出'),
+        rowProtected('狀態', lot.workflowStatus || '在庫'),
+        rowProtected('到貨/收件', lot.inboundTime ? UI.fmtDateTime(lot.inboundTime) : '未收'),
+        rowProtected('出貨/出件', lot.outboundTime ? UI.fmtDateTime(lot.outboundTime) : '未出'),
         rowProtected('每盒重量', (lot.weightPerBox != null && lot.weightPerBox !== '' ? lot.weightPerBox + ' kg' : '')),
         rowProtected('每盒件數', (lot.piecesPerBox != null && lot.piecesPerBox !== '' ? lot.piecesPerBox + ' 件' : '')),
         rowProtected('保存期至', UI.fmtDate(lot.expiryDate)),
@@ -171,23 +172,45 @@
         ['數量', lot.qty + ' ' + (lot.unit || '')], ['送貨地址', lot.deliveryAddress || '—']
       ];
       var prot = [
-        ['入庫時間', UI.fmtDateTime(lot.inboundTime)], ['出庫時間', lot.outboundTime ? UI.fmtDateTime(lot.outboundTime) : '未出'],
+        ['狀態', lot.workflowStatus || '在庫'],
+        ['到貨/收件時間', lot.inboundTime ? UI.fmtDateTime(lot.inboundTime) : '未收'],
+        ['出貨/出件時間', lot.outboundTime ? UI.fmtDateTime(lot.outboundTime) : '未出'],
         ['每盒重量', lot.weightPerBox ? lot.weightPerBox + ' kg' : '—'], ['每盒件數', lot.piecesPerBox ? lot.piecesPerBox + ' 件' : '—'],
         ['保存期至', UI.fmtDate(lot.expiryDate)], ['存放位置', lot.storageLocation || '—']
       ];
+      function updateLot(patch, msg) {
+        Store.update('stockLots', lot.id, patch);
+        UI.toast(msg, 'ok'); m.close(); showLotView(qrId);
+      }
+      var scanPanel = el('div', { class: 'mt-4 pt-3 border-t border-indigo/10' }, [
+        el('p', { class: 'text-xs font-bold uppercase tracking-wide text-indigo/60 mb-2', text: '📷 掃碼操作' }),
+        (function () {
+          var sel = el('select', { class: UI.inputClass() },
+            root.Biz.LOT_STATUSES.map(function (st) { var o = el('option', { value: st, text: st }); if (st === (lot.workflowStatus || '在庫')) o.selected = true; return o; }));
+          sel.addEventListener('change', function () { updateLot({ workflowStatus: sel.value }, '狀態已改為 ' + sel.value); });
+          return el('div', { class: 'mb-2' }, [el('label', { class: 'block text-xs text-indigo/60 mb-1', text: '改貨品狀態' }), sel]);
+        })(),
+        el('div', { class: 'flex gap-2' }, [
+          el('button', { class: UI.btnClass('primary') + ' flex-1 justify-center', text: '📥 記錄收件', onclick: function () { updateLot({ inboundTime: Store.nowISO(), workflowStatus: '在庫' }, '已記錄收件時間'); } }),
+          el('button', { class: UI.btnClass('accent') + ' flex-1 justify-center', text: '📤 記錄出件', onclick: function () { updateLot({ outboundTime: Store.nowISO(), workflowStatus: '已出庫' }, '已記錄出件時間'); } })
+        ])
+      ]);
       var body = el('div', {}, [
         el('div', { class: 'space-y-1 mb-4' }, rows.map(function (r) {
           return el('div', { class: 'flex justify-between border-b border-indigo/10 py-1 text-sm' }, [el('span', { class: 'text-indigo/60', text: r[0] }), el('span', { class: 'font-medium', text: r[1] })]);
         })),
-        el('p', { class: 'text-xs font-bold uppercase tracking-wide text-indigo/60 mb-1', text: '🔒 受保護資料' }),
-        unlocked ? el('div', { class: 'space-y-1' }, prot.map(function (r) {
-          return el('div', { class: 'flex justify-between border-b border-indigo/10 py-1 text-sm' }, [el('span', { class: 'text-indigo/60', text: r[0] }), el('span', { class: 'font-medium', text: r[1] })]);
-        })) : el('div', { class: 'text-center py-4' }, [el('button', { class: UI.btnClass('primary'), text: '🔓 輸入密碼查看', onclick: function () { UI.requireUnlock(function () { m.close(); showLotView(qrId); }); } })])
+        el('p', { class: 'text-xs font-bold uppercase tracking-wide text-indigo/60 mb-1', text: '🔒 受保護資料（需登入）' }),
+        unlocked ? el('div', {}, [
+          el('div', { class: 'space-y-1' }, prot.map(function (r) {
+            return el('div', { class: 'flex justify-between border-b border-indigo/10 py-1 text-sm' }, [el('span', { class: 'text-indigo/60', text: r[0] }), el('span', { class: 'font-medium', text: r[1] })]);
+          })),
+          scanPanel
+        ]) : el('div', { class: 'text-center py-4' }, [el('button', { class: UI.btnClass('primary'), text: '🔓 輸入密碼查看', onclick: function () { UI.requireUnlock(function () { m.close(); showLotView(qrId); }); } })])
       ]);
       var m = UI.modal({ title: '標籤資料 · ' + lot.qrId, width: 'max-w-md', body: body, actions: [{ label: '關閉', kind: 'ghost' }] });
       return m;
     }
-    view(UI.isUnlocked());
+    view(UI.isUnlocked() || !Store.settings().protectPasswordHash);
   }
 
   root.Modules = root.Modules || {};
