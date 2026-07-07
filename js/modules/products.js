@@ -17,9 +17,15 @@
       UI.iconBtn('⚙ 管理欄位', 'ghost', function () { manageColumns(container); })
     ]);
 
-    var cols = s.map(function (f) {
+    var cols = [{
+      label: '相片', sort: false, render: function (p) {
+        return p.photo
+          ? '<img src="' + p.photo + '" class="w-10 h-10 object-cover rounded-lg border border-indigo/10">'
+          : '<div class="w-10 h-10 rounded-lg bg-rice-paper/60 border border-indigo/10 flex items-center justify-center text-indigo/25">📷</div>';
+      }
+    }].concat(s.map(function (f) {
       return { label: f.label, render: function (p) { return formatCell(p[f.key], f); } };
-    });
+    }));
     cols.push({
       label: '操作', class: 'text-right whitespace-nowrap', render: function (p) {
         var wrap = el('div', { class: 'flex gap-1 justify-end' }, [
@@ -46,7 +52,32 @@
 
   function editProduct(p, container) {
     var s = schema();
+    var photoData = p ? (p.photo || '') : '';
+
+    // ---- product photo (compressed dataURL, works offline) ----
+    var photoPreview = el('div', { class: 'w-24 h-24 rounded-xl border-2 border-dashed border-indigo/20 bg-rice-paper/50 flex items-center justify-center overflow-hidden shrink-0' });
+    function drawPhoto() {
+      photoPreview.innerHTML = '';
+      if (photoData) { var img = el('img', { src: photoData, class: 'w-full h-full object-cover' }); photoPreview.appendChild(img); }
+      else photoPreview.appendChild(el('span', { class: 'text-indigo/30 text-3xl', text: '📷' }));
+    }
+    drawPhoto();
+    var fileInput = el('input', { type: 'file', accept: 'image/*', class: 'text-sm' });
+    fileInput.addEventListener('change', function () {
+      var f = fileInput.files && fileInput.files[0]; if (!f) return;
+      resizeImage(f, 480, 0.72, function (dataUrl) { photoData = dataUrl; drawPhoto(); });
+    });
+    var photoSection = el('div', { class: 'flex items-center gap-4 mb-5 pb-5 border-b border-indigo/10' }, [
+      photoPreview,
+      el('div', {}, [
+        el('label', { class: 'block text-xs font-bold uppercase tracking-wide text-indigo/60 mb-1', text: '產品相片' }),
+        fileInput,
+        photoData ? el('button', { class: 'block text-red-600 hover:underline text-xs mt-2', text: '移除相片', onclick: function () { photoData = ''; drawPhoto(); } }) : null
+      ])
+    ]);
+
     var body = el('div', {}, [
+      photoSection,
       UI.grid(2, s.map(function (f) {
         return UI.field({
           key: f.key, label: f.label, type: f.type, unit: f.unit, required: f.required,
@@ -62,12 +93,32 @@
         { label: '儲存', kind: 'primary', onClick: function (close) {
           var data = UI.readForm(body);
           if (!data.name) { UI.toast('請輸入貨品名稱', 'err'); return false; }
+          data.photo = photoData;
           if (p) Store.update('products', p.id, data);
           else Store.insert('products', data);
           UI.toast('已儲存', 'ok'); close(); render(container);
         } }
       ]
     });
+  }
+
+  // Read an image File, downscale to maxPx on the long edge, return a jpeg dataURL.
+  function resizeImage(file, maxPx, quality, cb) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var img = new Image();
+      img.onload = function () {
+        var w = img.width, h = img.height;
+        if (w > h && w > maxPx) { h = Math.round(h * maxPx / w); w = maxPx; }
+        else if (h >= w && h > maxPx) { w = Math.round(w * maxPx / h); h = maxPx; }
+        var canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        try { cb(canvas.toDataURL('image/jpeg', quality)); } catch (e) { cb(reader.result); }
+      };
+      img.onerror = function () { UI.toast('相片讀取失敗', 'err'); };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
   }
 
   // ---- Column manager (the "increase/decrease columns" feature) -----------
