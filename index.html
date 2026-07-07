@@ -5,20 +5,30 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>帝樂倉存系統 | Delights HK Inventory</title>
+    <!-- Load Tailwind FIRST, then set config (Play CDN reads tailwind.config after it loads). -->
+    <script src="https://cdn.tailwindcss.com"></script>
     <script>
-        tailwind = window.tailwind || {};
-        window.tailwind = { config: { theme: { extend: {
+        tailwind.config = { theme: { extend: {
             colors: { 'indigo': '#1d3557', 'terracotta': '#b86a48', 'rice-paper': '#edeae5' },
             fontFamily: { 'serif': ['Baskervville', 'Georgia', 'serif'], 'sans': ['Helvetica Now Text', 'Helvetica', 'Arial', 'sans-serif'] }
-        } } } };
+        } } };
     </script>
-    <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Baskervville:ital@0;1&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
     <style>
         body { font-family: 'Noto Sans TC', 'Helvetica Now Text', Helvetica, Arial, sans-serif; }
         .font-serif { font-family: 'Baskervville', Georgia, serif; }
+        /* Safety net: guarantee brand colours (and visible buttons) even if the
+           Tailwind config ever fails to load. Tailwind overrides these when present. */
+        .bg-indigo { background-color: #1d3557; }
+        .bg-terracotta { background-color: #b86a48; }
+        .bg-rice-paper { background-color: #edeae5; }
+        .text-indigo { color: #1d3557; }
+        .text-terracotta { color: #b86a48; }
+        .text-rice-paper { color: #edeae5; }
+        .border-indigo { border-color: #1d3557; }
+        body { background-color: #edeae5; }
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-thumb { background: #1d355733; border-radius: 4px; }
         /* Central polish: soften every white card in the content area at once. */
