@@ -1,300 +1,212 @@
-/*
- * supabase-adapter.js — offline-first cloud sync for the inventory system.
- *
- * Design: the UI keeps reading synchronously from the LOCAL cache (localStorage
- * via Store.LocalAdapter), so nothing in the app blocks on the network and it
- * keeps working offline. Writes go to the cache immediately, then push to
- * Supabase in the background. On boot / realtime change, cloud data is pulled
- * back into the cache and the current view re-renders.
- *
- * Storage model — ROW-LEVEL (see inventory/DATABASE.md): one row PER DOCUMENT
- * in table public.inventory_docs (collection, doc_id, data jsonb, deleted).
- * Writes diff each collection and upsert only the changed documents, so two
- * devices editing DIFFERENT records never clobber each other. Singleton
- * collections (settings/_seq/productSchema) are stored as one row, doc_id='_doc'.
- *
- * Config (URL + anon key + auth choice) lives in a raw localStorage key, NOT in
- * a synced collection. Credentials are entered by the user in Settings.
- */
+/* Module: 送貨單 (req 5) — delivery notes, print-optimised for Epson dot-matrix */
 (function (root) {
   'use strict';
-  var Store = root.Store;
-  var cache = Store.LocalAdapter;            // synchronous offline cache
-  var TABLE = 'inventory_docs';
-  var CFG_KEY = 'delights_inv_cloud_cfg';
-  var OPS_KEY = 'delights_inv_cloud_ops';    // pending per-document sync ops
-  var SEP = '::';
+  var UI = root.UI, Store = root.Store, el = UI.el;
 
-  // Collections stored as one row PER document (items must carry an `id`).
-  // Everything else (settings, _seq, productSchema) is a singleton blob.
-  var DOC_COLLECTIONS = {
-    products: 1, customers: 1, orders: 1, invoices: 1,
-    stockLots: 1, pricingTiers: 1, sieveLog: 1, queue: 1
-  };
-  function isDocCollection(c) { return DOC_COLLECTIONS.hasOwnProperty(c); }
+  function productName(id) { var p = Store.get('products', id); return p ? p.name : id; }
+  function product(id) { return Store.get('products', id); }
+  function customer(id) { return Store.get('customers', id); }
 
-  function loadRaw(key, def) { try { var v = localStorage.getItem(key); return v ? JSON.parse(v) : def; } catch (e) { return def; } }
-  function saveRaw(key, val) { localStorage.setItem(key, JSON.stringify(val)); }
+  function render(container) {
+    var orders = Store.all('orders').slice().sort(function (a, b) { return (b.deliveryDate || '').localeCompare(a.deliveryDate || ''); });
+    container.innerHTML = '';
+    container.appendChild(UI.sectionTitle('送貨單', '由訂單生成送貨單並用 Epson 針機列印', null));
 
-  var Cloud = {
-    client: null,
-    session: null,
-    status: 'off',        // off | connecting | online | offline | auth-required | error
-    lastError: '',
-    _listeners: [],
-    _flushTimer: null,
+    var cols = [
+      { label: '單號', render: function (o) { return '<b>' + o.orderNo + '</b>'; } },
+      { label: '客戶', render: function (o) { var c = customer(o.customerId); return c ? c.name : '—'; } },
+      { label: '送貨日', render: function (o) { return UI.fmtDate(o.deliveryDate); } },
+      { label: '送貨地址', class: 'max-w-xs', render: function (o) { return '<span class="text-indigo/70">' + (o.deliveryAddress || '—') + '</span>'; } },
+      { label: '項目', render: function (o) { return (o.lines || []).length + ' 項'; } },
+      { label: '操作', class: 'text-right whitespace-nowrap', render: function (o) {
+        return el('div', { class: 'flex gap-2 justify-end' }, [
+          el('button', { class: 'text-indigo hover:underline text-xs', text: '預覽', onclick: function () { preview(o.id); } }),
+          el('button', { class: 'text-terracotta hover:underline text-xs', text: '🖨 列印', onclick: function () { doPrint(o.id); } })
+        ]);
+      } }
+    ];
+    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4' }, [UI.table(cols, orders, { empty: '未有訂單。' })]));
 
-    // ---- config ----------------------------------------------------------
-    config: function () {
-      return Object.assign({ url: '', anonKey: '', enabled: false, requireAuth: true }, loadRaw(CFG_KEY, {}));
-    },
-    saveConfig: function (patch) { var next = Object.assign(this.config(), patch); saveRaw(CFG_KEY, next); return next; },
-    isEnabled: function () { var c = this.config(); return !!(c.enabled && c.url && c.anonKey); },
-    available: function () { return !!(root.supabase && root.supabase.createClient); },
-
-    onStatus: function (fn) { this._listeners.push(fn); },
-    _setStatus: function (s, err) { this.status = s; this.lastError = err || ''; this._listeners.forEach(function (f) { try { f(s, err); } catch (e) {} }); },
-
-    // ---- the adapter Store uses -----------------------------------------
-    adapter: {
-      ready: function () { return true; },
-      readAll: function (c) { return cache.readAll(c); },
-      writeAll: function (c, data) {
-        var old = cache.readAll(c);           // snapshot BEFORE overwrite, for diff
-        cache.writeAll(c, data);
-        Cloud.enqueueDiff(c, old, data);
-        Cloud.scheduleFlush();
-        return true;
-      },
-      keys: function () { return cache.keys(); }
-    },
-
-    // ---- pending per-document ops (offline-resilient, row-level) ---------
-    // ops key = "collection<SEP>doc_id" -> { collection, docId, op:'up'|'del', data }
-    _ops: function () { return loadRaw(OPS_KEY, {}); },
-    _saveOps: function (o) { saveRaw(OPS_KEY, o); },
-    _enqueue: function (collection, docId, op, data) {
-      var o = this._ops();
-      o[collection + SEP + docId] = { collection: collection, docId: docId, op: op, data: data };
-      this._saveOps(o);
-    },
-    // Diff a collection's old vs new value and enqueue only what changed.
-    enqueueDiff: function (collection, oldVal, newVal) {
-      if (!isDocCollection(collection)) {      // singleton -> single blob row
-        this._enqueue(collection, '_doc', 'up', newVal == null ? [] : newVal);
-        return;
-      }
-      var oldArr = Array.isArray(oldVal) ? oldVal : [];
-      var newArr = Array.isArray(newVal) ? newVal : [];
-      var oldById = {}, newById = {};
-      oldArr.forEach(function (d) { if (d && d.id != null) oldById[d.id] = d; });
-      newArr.forEach(function (d) { if (d && d.id != null) newById[d.id] = d; });
-      var self = this;
-      newArr.forEach(function (d) {
-        if (d && d.id != null) {
-          var prev = oldById[d.id];
-          if (!prev || JSON.stringify(prev) !== JSON.stringify(d)) self._enqueue(collection, String(d.id), 'up', d);
-        }
-      });
-      Object.keys(oldById).forEach(function (id) {
-        if (!newById.hasOwnProperty(id)) self._enqueue(collection, String(id), 'del', oldById[id]);
-      });
-    },
-
-    // ---- lifecycle -------------------------------------------------------
-    init: function () {
-      var c = this.config();
-      if (!this.isEnabled()) return false;
-      if (!this.available()) { this._setStatus('error', 'Supabase 程式庫未載入（可能離線）'); return false; }
-      try {
-        this.client = root.supabase.createClient(c.url, c.anonKey, { auth: { persistSession: true, autoRefreshToken: true } });
-      } catch (e) { this._setStatus('error', e.message); return false; }
-      Store.adapter = this.adapter;           // route all reads/writes through cache+sync
-      var self = this;
-      this.client.auth.onAuthStateChange(function (_evt, session) {
-        self.session = session;
-        if (session) { self._setStatus('online'); self.flush(); }
-      });
-      // flush the queue whenever the network returns
-      root.addEventListener('online', function () { self.flush(); self.pull(); });
-      return true;
-    },
-
-    // Full startup: handle login gate, pull cloud data, seed if empty, subscribe.
-    // Calls done() when the app is ready to render.
-    start: function (done) {
-      var self = this;
-      var c = this.config();
-      if (!this.init()) { Store.ensureSeed(); done(); return; }
-      this._setStatus('connecting');
-      this.client.auth.getSession().then(function (res) {
-        self.session = (res.data && res.data.session) || null;
-        if (c.requireAuth && !self.session) {
-          self._setStatus('auth-required');
-          self.showLogin(function () { self._afterAuth(done); });
-        } else {
-          self._afterAuth(done);
-        }
-      }).catch(function (e) { self._setStatus('error', e.message); Store.ensureSeed(); done(); });
-    },
-
-    _afterAuth: function (done) {
-      var self = this;
-      this._setStatus('connecting');
-      // Push any local offline edits first, then pull cloud state. Flushing
-      // before pulling means our unsynced docs are not lost to the pull.
-      this.flush().then(function () {
-        return self.pull();
-      }).then(function () {
-        // first-time cloud: empty -> seed locally (auto-enqueues) then push up
-        if (cache.readAll('productSchema') == null) { Store.ensureSeed(); return self.flush(); }
-      }).then(function () {
-        self.subscribe();
-        self._setStatus('online');
-        done();
-      }).catch(function (e) {
-        // offline / RLS error: fall back to whatever is cached
-        self._setStatus('offline', e.message);
-        if (cache.readAll('productSchema') == null) Store.ensureSeed();
-        done();
-      });
-    },
-
-    // ---- sync (row-level) ------------------------------------------------
-    // Rebuild the local cache from cloud rows, one collection at a time.
-    _applyRows: function (rows, onlyCollection) {
-      var byColl = {};
-      (rows || []).forEach(function (row) {
-        var c = row.collection;
-        if (!byColl[c]) byColl[c] = { docs: [], singleton: undefined };
-        if (row.deleted) return;                      // skip tombstones
-        if (row.doc_id === '_doc') byColl[c].singleton = row.data;
-        else byColl[c].docs.push(row.data);
-      });
-      Object.keys(byColl).forEach(function (c) {
-        if (onlyCollection && c !== onlyCollection) return;
-        if (isDocCollection(c)) cache.writeAll(c, byColl[c].docs);       // pure cache write, no enqueue
-        else if (byColl[c].singleton !== undefined) cache.writeAll(c, byColl[c].singleton);
-      });
-      Store._emit('*');
-    },
-    pull: function () {
-      var self = this;
-      if (!this.client) return Promise.resolve();
-      return this.client.from(TABLE).select('collection,doc_id,data,deleted').then(function (res) {
-        if (res.error) throw res.error;
-        self._applyRows(res.data, null);
-      });
-    },
-    pullOne: function (collection) {
-      var self = this;
-      if (!this.client) return;
-      this.client.from(TABLE).select('collection,doc_id,data,deleted').eq('collection', collection).then(function (res) {
-        if (res.error) return;
-        self._applyRows(res.data, collection);
-      });
-    },
-    scheduleFlush: function () {
-      var self = this;
-      clearTimeout(this._flushTimer);
-      this._flushTimer = setTimeout(function () { self.flush(); }, 700);
-    },
-    flush: function () {
-      var self = this;
-      if (!this.client) return Promise.resolve();
-      var c = this.config();
-      if (c.requireAuth && !this.session) return Promise.resolve(); // wait until logged in
-      var ops = this._ops();
-      var keys = Object.keys(ops);
-      if (!keys.length) return Promise.resolve();
-      var rows = keys.map(function (k) {
-        var o = ops[k];
-        return { collection: o.collection, doc_id: o.docId, data: o.data == null ? {} : o.data, deleted: o.op === 'del', updated_at: new Date().toISOString() };
-      });
-      return this.client.from(TABLE).upsert(rows, { onConflict: 'collection,doc_id' }).then(function (res) {
-        if (res.error) { self._setStatus('offline', res.error.message); throw res.error; }
-        // clear only ops we flushed AND that were not re-edited during the flush
-        var cur = self._ops();
-        keys.forEach(function (k) { if (cur[k] && JSON.stringify(cur[k]) === JSON.stringify(ops[k])) delete cur[k]; });
-        self._saveOps(cur);
-        self._setStatus('online');
-      }).catch(function (e) { self._setStatus('offline', e.message); });
-    },
-    subscribe: function () {
-      var self = this;
-      if (!this.client || this.channel) return;
-      this.channel = this.client.channel('inv_docs')
-        .on('postgres_changes', { event: '*', schema: 'public', table: TABLE }, function (payload) {
-          var coll = (payload.new && payload.new.collection) || (payload.old && payload.old.collection);
-          if (coll) self.pullOne(coll);
-        })
-        .subscribe();
-    },
-
-    // ---- auth ------------------------------------------------------------
-    login: function (email, password) {
-      if (!this.client) return Promise.reject(new Error('未連接'));
-      return this.client.auth.signInWithPassword({ email: email, password: password }).then(function (res) {
-        if (res.error) throw res.error; return res.data.session;
-      });
-    },
-    logout: function () {
-      var self = this;
-      if (!this.client) return Promise.resolve();
-      return this.client.auth.signOut().then(function () { self.session = null; self._setStatus('auth-required'); });
-    },
-
-    // ---- login screen ----------------------------------------------------
-    showLogin: function (onSuccess) {
-      var UI = root.UI, el = UI.el, self = this;
-      var overlay = el('div', { class: 'fixed inset-0 z-[95] bg-indigo flex items-center justify-center p-6' });
-      var form = el('div', { class: 'bg-rice-paper w-full max-w-sm p-8 shadow-2xl' }, [
-        el('div', { class: 'font-serif text-2xl text-indigo mb-1', text: '帝樂倉存系統' }),
-        el('p', { class: 'text-sm text-indigo/60 mb-6', text: '請登入以存取雲端資料' }),
-        UI.field({ key: 'email', label: 'Email', type: 'text' }),
-        el('div', { class: 'h-3' }),
-        UI.field({ key: 'password', label: '密碼', type: 'password' }),
-        el('div', { class: 'mt-6 flex flex-col gap-2' })
-      ]);
-      var btnWrap = form.lastChild;
-      var btn = el('button', { class: UI.btnClass('primary') + ' w-full justify-center', text: '登入' });
-      var localBtn = el('button', { class: 'text-xs text-indigo/50 hover:text-terracotta', text: '暫時離線使用本地資料' });
-      var errP = el('p', { class: 'text-sm text-red-600 mt-2 min-h-[1.2em]' });
-      btnWrap.appendChild(btn); btnWrap.appendChild(errP); btnWrap.appendChild(localBtn);
-      overlay.appendChild(form);
-      document.body.appendChild(overlay);
-
-      function submit() {
-        var d = UI.readForm(form);
-        btn.textContent = '登入中…'; btn.disabled = true; errP.textContent = '';
-        self.login(d.email, d.password).then(function () {
-          overlay.remove(); onSuccess();
-        }).catch(function (e) { errP.textContent = translateAuthErr(e.message); btn.textContent = '登入'; btn.disabled = false; });
-      }
-      btn.addEventListener('click', submit);
-      form.addEventListener('keydown', function (e) { if (e.key === 'Enter') submit(); });
-      localBtn.addEventListener('click', function () {
-        // temporary local-only session: keep cache, skip cloud until reload
-        overlay.remove(); self._setStatus('offline', '離線使用'); if (cache.readAll('productSchema') == null) Store.ensureSeed(); onSuccess();
-      });
-      setTimeout(function () { var i = form.querySelector('input'); if (i) i.focus(); }, 60);
-    },
-
-    // Switch back to pure local mode.
-    disable: function () {
-      this.saveConfig({ enabled: false });
-      if (this.channel) { try { this.client.removeChannel(this.channel); } catch (e) {} this.channel = null; }
-      Store.adapter = cache;
-      this._setStatus('off');
-    }
-  };
-
-  function translateAuthErr(m) {
-    if (/Invalid login/i.test(m)) return 'Email 或密碼錯誤';
-    if (/Email not confirmed/i.test(m)) return 'Email 尚未確認';
-    if (/network|fetch/i.test(m)) return '網絡連線失敗';
-    return m;
+    container.appendChild(el('div', { class: 'mt-4 text-xs text-indigo/50' }, [
+      el('p', { text: '針機提示：於列印對話框選擇 Epson 針機，紙張選「連續紙 / Continuous」或對應尺寸，邊界設為最小。可於「設定」調整公司資料同頁尾。' })
+    ]));
   }
 
-  root.Cloud = Cloud;
+  // Build delivery-note HTML string (self-contained, B&W, dot-matrix friendly)
+  function noteHTML(order) {
+    var s = Store.settings();
+    var c = customer(order.customerId) || {};
+    var rows = (order.lines || []).map(function (l, i) {
+      var p = product(l.productId) || {};
+      var amt = Number(l.qty || 0) * Number(l.unitPrice || 0);
+      return '<tr>' +
+        '<td class="c">' + (i + 1) + '</td>' +
+        '<td>' + (p.sku || '') + '</td>' +
+        '<td>' + (p.name || l.productId) + '</td>' +
+        '<td class="r">' + l.qty + '</td>' +
+        '<td>' + (p.unit || '') + '</td>' +
+        '<td class="r">' + Number(l.unitPrice || 0).toFixed(2) + '</td>' +
+        '<td class="r">' + amt.toFixed(2) + '</td>' +
+        '</tr>';
+    }).join('');
+    var total = (order.lines || []).reduce(function (a, l) { return a + Number(l.qty || 0) * Number(l.unitPrice || 0); }, 0);
+    var totalQty = (order.lines || []).reduce(function (a, l) { return a + Number(l.qty || 0); }, 0);
+
+    return '' +
+      '<div class="dn">' +
+      '<div class="dn-head">' +
+        '<div><div class="dn-co">' + s.companyName + '</div>' +
+        '<div class="dn-co-en">' + (s.companyNameEn || '') + '</div>' +
+        '<div class="dn-sm">' + (s.companyAddress || '') + '</div>' +
+        '<div class="dn-sm">Tel: ' + (s.companyPhone || '') + (s.companyBR ? '　BR: ' + s.companyBR : '') + '</div></div>' +
+        '<div class="dn-title">送 貨 單<br><span class="dn-title-en">DELIVERY NOTE</span></div>' +
+      '</div>' +
+      '<table class="dn-meta"><tr>' +
+        '<td><b>送貨單號 No.:</b> ' + order.orderNo + '</td>' +
+        '<td><b>下單日 Order:</b> ' + UI.fmtDate(order.orderDate) + '</td>' +
+        '<td><b>送貨日 Delivery:</b> ' + UI.fmtDate(order.deliveryDate) + '</td>' +
+      '</tr></table>' +
+      '<table class="dn-cust"><tr>' +
+        '<td><b>客戶 Customer:</b> ' + (c.name || '') + '<br><b>聯絡 Contact:</b> ' + (c.contact || '') + '</td>' +
+        '<td><b>送貨地址 Deliver to:</b><br>' + (order.deliveryAddress || c.address || '') + '</td>' +
+      '</tr></table>' +
+      '<table class="dn-items">' +
+        '<thead><tr><th>#</th><th>編號 Code</th><th>貨品 Description</th><th class="r">數量 Qty</th><th>單位</th><th class="r">單價</th><th class="r">金額 Amount</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+        '<tfoot><tr><td colspan="3" class="r"><b>合計 Total</b></td><td class="r"><b>' + totalQty + '</b></td><td></td><td></td><td class="r"><b>' + total.toFixed(2) + '</b></td></tr></tfoot>' +
+      '</table>' +
+      (order.note ? '<div class="dn-note"><b>備註 Remarks:</b> ' + order.note + '</div>' : '') +
+      '<table class="dn-sign"><tr>' +
+        '<td>發貨人 Issued by:<br><br>______________</td>' +
+        '<td>司機 Driver:<br><br>______________</td>' +
+        '<td>' + (s.deliveryNoteFooter || '收貨人簽署 Received by') + ':<br><br>______________</td>' +
+      '</tr></table>' +
+      '<div class="dn-foot">此送貨單一式兩份，收貨後請簽回一份。 Printed ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + '</div>' +
+      '</div>';
+  }
+
+  function noteCSS() {
+    return '<style>' +
+      '*{box-sizing:border-box;}' +
+      'body{margin:0;font-family:"Courier New",Courier,"Noto Sans TC",monospace;color:#000;font-size:11pt;}' +
+      '.dn{padding:6mm;max-width:200mm;}' +
+      '.dn-head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #000;padding-bottom:2mm;}' +
+      '.dn-co{font-size:15pt;font-weight:bold;font-family:"Noto Sans TC",sans-serif;}' +
+      '.dn-co-en{font-size:9pt;letter-spacing:1px;}' +
+      '.dn-sm{font-size:8.5pt;}' +
+      '.dn-title{text-align:right;font-size:16pt;font-weight:bold;letter-spacing:3px;font-family:"Noto Sans TC",sans-serif;}' +
+      '.dn-title-en{font-size:8pt;letter-spacing:2px;}' +
+      '.dn-meta,.dn-cust,.dn-sign{width:100%;border-collapse:collapse;margin-top:2mm;}' +
+      '.dn-meta td{font-size:9.5pt;padding:1mm 0;}' +
+      '.dn-cust td{border:1px solid #000;padding:2mm;vertical-align:top;font-size:9.5pt;width:50%;}' +
+      '.dn-items{width:100%;border-collapse:collapse;margin-top:3mm;}' +
+      '.dn-items th,.dn-items td{border:1px solid #000;padding:1.5mm 2mm;font-size:9.5pt;}' +
+      '.dn-items th{background:#eee;font-family:"Noto Sans TC",sans-serif;}' +
+      '.dn-items .r,.r{text-align:right;}.dn-items .c,.c{text-align:center;}' +
+      '.dn-note{margin-top:2mm;font-size:9.5pt;border:1px solid #000;padding:2mm;}' +
+      '.dn-sign{margin-top:8mm;}' +
+      '.dn-sign td{width:33%;font-size:9pt;padding:2mm;vertical-align:top;}' +
+      '.dn-foot{margin-top:4mm;font-size:8pt;text-align:center;border-top:1px dashed #000;padding-top:1mm;}' +
+      '@media print{.dn{padding:4mm;}@page{margin:6mm;}}' +
+      '</style>';
+  }
+
+  // ---- Plain-text delivery note for dot-matrix continuous paper ----------
+  // CJK characters occupy 2 columns in a monospace / dot-matrix font.
+  function dispWidth(s) { var w = 0; for (var i = 0; i < s.length; i++) { w += s.charCodeAt(i) > 0x2e7f ? 2 : 1; } return w; }
+  function padEnd(s, n) { s = String(s == null ? '' : s); var w = dispWidth(s); if (w > n) { // truncate to fit
+      var out = '', ww = 0; for (var i = 0; i < s.length; i++) { var cw = s.charCodeAt(i) > 0x2e7f ? 2 : 1; if (ww + cw > n) break; out += s[i]; ww += cw; } return out + new Array(Math.max(0, n - ww) + 1).join(' '); }
+    return s + new Array(n - w + 1).join(' '); }
+  function padStart(s, n) { s = String(s == null ? '' : s); var w = dispWidth(s); return (w >= n ? s : new Array(n - w + 1).join(' ') + s); }
+  function rule(ch, width) { return new Array(width + 1).join(ch); }
+
+  function noteText(order, width) {
+    var s = Store.settings(); var c = customer(order.customerId) || {};
+    var L = [];
+    L.push(padEnd(s.companyName, width - 18) + padStart('送貨單 DELIVERY NOTE', 18));
+    if (s.companyNameEn) L.push(s.companyNameEn);
+    if (s.companyAddress) L.push(s.companyAddress);
+    L.push('Tel: ' + (s.companyPhone || '') + (s.companyBR ? '   BR: ' + s.companyBR : ''));
+    L.push(rule('=', width));
+    L.push('單號 No.: ' + padEnd(order.orderNo, Math.max(10, width / 2 - 12)) + '下單 Order: ' + UI.fmtDate(order.orderDate));
+    L.push('客戶 To : ' + padEnd(c.name || '', Math.max(10, width / 2 - 12)) + '送貨 Deliv: ' + UI.fmtDate(order.deliveryDate));
+    L.push('送貨地址: ' + (order.deliveryAddress || c.address || ''));
+    L.push(rule('-', width));
+    // columns: # code desc qty unit price amount
+    var wNo = 3, wQty = 6, wUnit = 5, wPrice = 9, wAmt = 11;
+    var wDesc = width - wNo - wQty - wUnit - wPrice - wAmt - 5; if (wDesc < 10) wDesc = 10;
+    L.push(padEnd('#', wNo) + ' ' + padEnd('貨品 Description', wDesc) + ' ' + padStart('數量', wQty) + ' ' + padEnd('單位', wUnit) + ' ' + padStart('單價', wPrice) + ' ' + padStart('金額', wAmt));
+    L.push(rule('-', width));
+    var total = 0, totalQty = 0;
+    (order.lines || []).forEach(function (l, i) {
+      var p = product(l.productId) || {}; var amt = Number(l.qty || 0) * Number(l.unitPrice || 0); total += amt; totalQty += Number(l.qty || 0);
+      L.push(padEnd(i + 1, wNo) + ' ' + padEnd((p.name || l.productId), wDesc) + ' ' + padStart(l.qty, wQty) + ' ' + padEnd(p.unit || '', wUnit) + ' ' + padStart(Number(l.unitPrice || 0).toFixed(2), wPrice) + ' ' + padStart(amt.toFixed(2), wAmt));
+    });
+    L.push(rule('-', width));
+    L.push(padStart('合計 Total:', width - wAmt - wQty - 8) + ' ' + padStart(totalQty, wQty) + '        ' + padStart(total.toFixed(2), wAmt));
+    if (order.note) L.push('備註 Remarks: ' + order.note);
+    L.push(rule('=', width));
+    L.push('');
+    L.push('發貨 Issued: ____________   司機 Driver: ____________   收貨 Received: ____________');
+    L.push('');
+    L.push(padStart('Printed ' + new Date().toISOString().slice(0, 16).replace('T', ' '), width));
+    return L.join('\n');
+  }
+
+  function printText(orderId, width) {
+    var order = Store.get('orders', orderId); if (!order) return;
+    var txt = noteText(order, width);
+    var w = window.open('', '_blank', 'width=780,height=900');
+    w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>DN ' + order.orderNo + '</title>' +
+      '<style>@page{margin:6mm;}body{margin:0;}pre{font-family:"Courier New",monospace;font-size:10pt;line-height:1.2;white-space:pre;}</style></head><body><pre>' +
+      txt.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre></body></html>');
+    w.document.close(); w.focus(); setTimeout(function () { w.print(); }, 300);
+  }
+
+  function preview(orderId) {
+    var order = Store.get('orders', orderId);
+    if (!order) return;
+    var mode = { type: 'html', width: 80 };
+    var toolbar = el('div', { class: 'flex items-center gap-2 mb-3 flex-wrap' });
+    var wrap = el('div', { class: 'bg-white border border-indigo/10', style: 'max-height:65vh;overflow:auto;' });
+
+    function draw() {
+      if (mode.type === 'html') { wrap.innerHTML = noteCSS() + noteHTML(order); }
+      else {
+        wrap.innerHTML = '';
+        wrap.appendChild(el('pre', { class: 'p-3 text-xs', style: 'font-family:"Courier New",monospace;white-space:pre;', text: noteText(order, mode.width) }));
+      }
+    }
+    function drawToolbar() {
+      toolbar.innerHTML = '';
+      function tab(label, active, on) { return el('button', { class: 'px-3 py-1 text-sm border ' + (active ? 'bg-indigo text-white border-indigo' : 'border-indigo/20 text-indigo hover:bg-indigo/5'), text: label, onclick: on }); }
+      toolbar.appendChild(tab('HTML 版', mode.type === 'html', function () { mode.type = 'html'; drawToolbar(); draw(); }));
+      toolbar.appendChild(tab('純文字 (針機)', mode.type === 'text', function () { mode.type = 'text'; drawToolbar(); draw(); }));
+      if (mode.type === 'text') {
+        toolbar.appendChild(el('span', { class: 'text-xs text-indigo/50 ml-2', text: '欄寬：' }));
+        [80, 96, 132].forEach(function (w) { toolbar.appendChild(tab(w + '欄', mode.width === w, function () { mode.width = w; drawToolbar(); draw(); })); });
+      }
+    }
+    drawToolbar(); draw();
+
+    UI.modal({
+      title: '送貨單預覽 ' + order.orderNo, width: 'max-w-4xl', body: el('div', {}, [toolbar, wrap]),
+      actions: [{ label: '關閉', kind: 'ghost' }, { label: '🖨 列印', kind: 'primary', onClick: function (close) {
+        if (mode.type === 'html') doPrint(orderId); else printText(orderId, mode.width);
+      } }]
+    });
+  }
+
+  function doPrint(orderId) {
+    var order = Store.get('orders', orderId);
+    if (!order) { UI.toast('搵唔到訂單', 'err'); return; }
+    var w = window.open('', '_blank', 'width=800,height=900');
+    w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>DN ' + order.orderNo + '</title>' + noteCSS() + '</head><body>' + noteHTML(order) + '</body></html>');
+    w.document.close(); w.focus();
+    setTimeout(function () { w.print(); }, 350);
+  }
+
+  root.Modules = root.Modules || {};
+  root.Modules.delivery = { id: 'delivery', label: '送貨單', icon: '🚚', render: render, print: doPrint, preview: preview };
+
 })(typeof window !== 'undefined' ? window : this);
