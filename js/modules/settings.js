@@ -100,10 +100,11 @@
     var Cloud = root.Cloud;
     var wrap = el('div', { class: 'bg-white border border-indigo/10 p-5 mb-5' });
     function statusBadge() {
-      if (!Cloud) return UI.badge('未載入', 'muted');
+      // el() renders string children as TEXT, so wrap the badge HTML in a node.
+      if (!Cloud) return el('span', { html: UI.badge('未載入', 'muted') });
       var map = { off: ['本地模式（未啟用雲端）', 'muted'], connecting: ['連接中…', 'warn'], online: ['雲端已連線 ✓', 'ok'], offline: ['離線（用本地快取）', 'warn'], 'auth-required': ['需要登入', 'warn'], error: ['錯誤', 'err'] };
       var s = map[Cloud.status] || ['—', 'muted'];
-      return UI.badge(s[0] + (Cloud.lastError ? '：' + Cloud.lastError : ''), s[1]);
+      return el('span', { html: UI.badge(s[0] + (Cloud.lastError ? '：' + Cloud.lastError : ''), s[1]) });
     }
     function draw() {
       var cfg = Cloud ? Cloud.config() : { url: '', anonKey: '', requireAuth: true };

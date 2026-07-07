@@ -159,25 +159,75 @@
     return el('div', { class: 'grid grid-cols-1 md:grid-cols-' + cols + ' gap-4' }, nodes);
   }
 
-  // ---- Table ---------------------------------------------------------------
-  // columns: [{label, render(row)->string|node, class}], rows, opts:{empty}
+  // ---- Table (sortable) ----------------------------------------------------
+  // columns: [{label, render(row)->string|node, class, key?, sortValue?(row), sort?:false}]
+  // Click a header to sort. A column is sortable unless sort:false or it renders
+  // a node (e.g. the 操作/actions column). Provide sortValue for custom keys.
   function table(columns, rows, opts) {
     opts = opts || {};
-    var thead = el('thead', {}, [el('tr', { class: 'text-left border-b-2 border-indigo/20' },
-      columns.map(function (c) { return el('th', { class: 'py-2 px-3 text-xs font-bold uppercase tracking-wide text-indigo/60 ' + (c.class || ''), text: c.label }); }))]);
-    var tbody = el('tbody', {}, rows.length ? rows.map(function (row) {
-      return el('tr', { class: 'border-b border-indigo/10 hover:bg-rice-paper/50' },
-        columns.map(function (c) {
-          var content = c.render ? c.render(row) : row[c.key];
-          var td = el('td', { class: 'py-2 px-3 text-sm align-top ' + (c.class || '') });
-          if (content == null) content = '';
-          if (typeof content === 'string' || typeof content === 'number') td.innerHTML = String(content);
-          else td.appendChild(content);
-          return td;
-        }));
-    }) : [el('tr', {}, [el('td', { class: 'py-8 text-center text-indigo/40', colspan: columns.length, text: opts.empty || '暫無資料' })])]);
-    return el('div', { class: 'overflow-x-auto' }, [el('table', { class: 'w-full min-w-full' }, [thead, tbody])]);
+    var container = el('div', { class: 'overflow-x-auto' });
+    var sample = rows.length ? rows[0] : null;
+
+    function isSortable(c) {
+      if (c.sort === false) return false;
+      if (c.sortValue || c.key != null) return true;
+      if (c.render && sample) { var v = c.render(sample); return typeof v === 'string' || typeof v === 'number'; }
+      return false;
+    }
+    function sortVal(c, row) {
+      if (c.sortValue) return c.sortValue(row);
+      if (c.key != null) return row[c.key];
+      if (c.render) { var v = c.render(row); if (typeof v === 'string') return v.replace(/<[^>]*>/g, '').trim(); if (typeof v === 'number') return v; }
+      return '';
+    }
+    function asNum(v) { var n = Number(String(v).replace(/[^0-9.\-]/g, '')); return String(v).match(/[0-9]/) ? n : NaN; }
+    function cmp(a, b, c) {
+      var va = sortVal(c, a), vb = sortVal(c, b);
+      var na = asNum(va), nb = asNum(vb);
+      if (!isNaN(na) && !isNaN(nb) && na !== nb) return na - nb;
+      return String(va == null ? '' : va).localeCompare(String(vb == null ? '' : vb), 'zh-Hant', { numeric: true });
+    }
+
+    var state = { idx: opts.sortIdx == null ? -1 : opts.sortIdx, dir: opts.sortDir || 1 };
+
+    function build() {
+      var view = rows.slice();
+      if (state.idx >= 0 && columns[state.idx]) {
+        var c = columns[state.idx];
+        view.sort(function (a, b) { return cmp(a, b, c) * state.dir; });
+      }
+      var thead = el('thead', {}, [el('tr', { class: 'text-left border-b-2 border-indigo/20' },
+        columns.map(function (c, i) {
+          var sortable = isSortable(c);
+          var arrow = state.idx === i ? (state.dir === 1 ? ' ▲' : ' ▼') : (sortable ? ' ⇅' : '');
+          var th = el('th', {
+            class: 'py-2 px-3 text-xs font-bold uppercase tracking-wide text-indigo/60 ' + (c.class || '') + (sortable ? ' cursor-pointer select-none hover:text-terracotta' : ''),
+            html: escapeHtml(c.label) + '<span class="text-indigo/30">' + arrow + '</span>'
+          });
+          if (sortable) th.addEventListener('click', function () {
+            if (state.idx === i) state.dir = -state.dir; else { state.idx = i; state.dir = 1; }
+            build();
+          });
+          return th;
+        }))]);
+      var tbody = el('tbody', {}, view.length ? view.map(function (row) {
+        return el('tr', { class: 'border-b border-indigo/10 hover:bg-rice-paper/50' },
+          columns.map(function (c) {
+            var content = c.render ? c.render(row) : row[c.key];
+            var td = el('td', { class: 'py-2 px-3 text-sm align-top ' + (c.class || '') });
+            if (content == null) content = '';
+            if (typeof content === 'string' || typeof content === 'number') td.innerHTML = String(content);
+            else td.appendChild(content);
+            return td;
+          }));
+      }) : [el('tr', {}, [el('td', { class: 'py-8 text-center text-indigo/40', colspan: columns.length, text: opts.empty || '暫無資料' })])]);
+      container.innerHTML = '';
+      container.appendChild(el('table', { class: 'w-full min-w-full' }, [thead, tbody]));
+    }
+    build();
+    return container;
   }
+  function escapeHtml(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
   function badge(text, kind) {
     var colors = {

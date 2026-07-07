@@ -18,9 +18,9 @@
   function render(container) {
     var lots = Store.all('stockLots');
     container.innerHTML = '';
-    container.appendChild(UI.sectionTitle('標籤打印', '為入庫貨品列印專屬 QR 標籤（Epson / 標籤機）', el('div', {}, [
-      UI.badge(UI.isUnlocked() ? '🔓 受保護資料已解鎖' : '🔒 受保護資料已鎖', UI.isUnlocked() ? 'ok' : 'muted')
-    ])));
+    container.appendChild(UI.sectionTitle('標籤打印', '為入庫貨品列印專屬 QR 標籤（Epson / 標籤機）', el('span', {
+      html: UI.badge(UI.isUnlocked() ? '🔓 受保護資料已解鎖' : '🔒 受保護資料已鎖', UI.isUnlocked() ? 'ok' : 'muted')
+    })));
 
     var cols = [
       { label: '批次', render: function (l) { return '<b>' + (l.lotCode || l.qrId) + '</b>'; } },
