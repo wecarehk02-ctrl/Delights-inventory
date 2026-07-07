@@ -8,7 +8,16 @@
 
   function render(container) {
     var orders = Store.all('orders').slice().sort(function (a, b) { return (b.orderDate || '').localeCompare(a.orderDate || ''); });
-    var right = el('div', { class: 'flex gap-2' }, [UI.iconBtn('＋ 新下單', 'primary', function () { editOrder(null, container); })]);
+    var newOrder = function () { editOrder(null, container); };
+    var right = el('div', { class: 'flex gap-2' }, [UI.iconBtn('＋ 新下單', 'primary', newOrder)]);
+    var actionBar = el('div', { class: 'mb-4 flex justify-end' }, [
+      el('button', {
+        class: UI.btnClass('primary'),
+        style: 'display:inline-block;min-height:42px;padding:10px 16px;border:0;cursor:pointer;',
+        text: '＋ 新下單',
+        onclick: newOrder
+      })
+    ]);
 
     var cols = [
       { label: '單號', render: function (o) { return '<b>' + (o.orderNo || '') + '</b>'; } },
@@ -33,6 +42,7 @@
 
     container.innerHTML = '';
     container.appendChild(UI.sectionTitle('下單系統', '銷售落單、選送貨日期同地址、每日出貨項目及價錢', right));
+    container.appendChild(actionBar);
     container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4' }, [UI.table(cols, orders, { empty: '未有訂單。' })]));
   }
 
