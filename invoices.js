@@ -1,63 +1,67 @@
-/* Module: 客戶 — customer records, settlement type, assigned pricing tier */
+/* Module: 總覽 — at-a-glance dashboard */
 (function (root) {
   'use strict';
-  var UI = root.UI, Store = root.Store, el = UI.el;
+  var UI = root.UI, Store = root.Store, Biz = root.Biz, el = UI.el;
 
   function render(container) {
-    var customers = Store.all('customers');
-    var right = el('div', {}, [UI.iconBtn('＋ 新增客戶', 'primary', function () { edit(null, container); })]);
-    container.innerHTML = '';
-    container.appendChild(UI.sectionTitle('客戶', '客戶資料、結算方式（單次／月結）、指派階梯價', right));
+    var low = Biz.lowStockItems();
+    var expiring = Biz.expiringLots();
+    var expired = expiring.filter(function (e) { return e.expired; });
+    var orders = Store.all('orders');
+    var pendingOrders = orders.filter(function (o) { return o.status !== 'invoiced'; });
+    var sieveOut = Biz.sieveTotalOutstanding();
+    var products = Store.all('products');
+    var lots = Store.all('stockLots').filter(function (l) { return l.status !== 'shipped'; });
 
-    var cols = [
-      { label: '名稱', render: function (c) { return '<b>' + c.name + '</b>'; } },
-      { label: '聯絡', render: function (c) { return c.contact || '—'; } },
-      { label: 'Email', render: function (c) { return c.email || '—'; } },
-      { label: '地址', class: 'max-w-xs', render: function (c) { return '<span class="text-indigo/70">' + (c.address || '—') + '</span>'; } },
-      { label: '結算', render: function (c) { return c.settlementType === 'monthly' ? UI.badge('月結', 'info') : UI.badge('單次', 'muted'); } },
-      { label: '階梯價', render: function (c) { var t = c.pricingTierId ? Store.get('pricingTiers', c.pricingTierId) : null; return t ? t.name : '<span class="text-indigo/30">標準</span>'; } },
-      { label: '操作', class: 'text-right whitespace-nowrap', render: function (c) {
-        return el('div', { class: 'flex gap-2 justify-end' }, [
-          el('button', { class: 'text-terracotta hover:underline text-xs', text: '編輯', onclick: function () { edit(c, container); } }),
-          el('button', { class: 'text-red-600 hover:underline text-xs', text: '刪除', onclick: function () { UI.confirmModal('刪除客戶「' + c.name + '」？', function () { Store.remove('customers', c.id); render(container); }, { danger: true }); } })
-        ]);
-      } }
-    ];
-    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4' }, [UI.table(cols, customers, { empty: '未有客戶。' })]));
+    container.innerHTML = '';
+    container.appendChild(UI.sectionTitle('總覽', '帝樂倉存系統 · ' + new Date().toISOString().slice(0, 10), null));
+
+    var stats = el('div', { class: 'grid grid-cols-2 md:grid-cols-4 gap-4 mb-8' }, [
+      stat('產品項目', products.length, '📦', 'products'),
+      stat('在庫批次', lots.length, '🏭', 'inventory'),
+      stat('待處理訂單', pendingOrders.length, '🧾', 'orders'),
+      stat('未回篩', sieveOut, '🧺', 'sieve')
+    ]);
+    container.appendChild(stats);
+
+    // alerts
+    var alerts = [];
+    if (low.length) alerts.push(alertCard('err', '⚠ 補貨提示', low.length + ' 項貨品低於安全庫存', '去庫存', 'inventory'));
+    if (expired.length) alerts.push(alertCard('err', '⏰ 已過期', expired.length + ' 個批次已過期', '去處理', 'inventory'));
+    if (expiring.length - expired.length > 0) alerts.push(alertCard('warn', '⏳ 接近到期', (expiring.length - expired.length) + ' 個批次接近到期', '查看', 'inventory'));
+    if (!alerts.length) alerts.push(alertCard('ok', '✓ 一切正常', '暫無庫存或到期警告', '', ''));
+    container.appendChild(el('div', { class: 'grid grid-cols-1 md:grid-cols-3 gap-4 mb-8' }, alerts));
+
+    // quick actions
+    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-5' }, [
+      el('h3', { class: 'font-serif text-lg text-indigo mb-4', text: '快速操作' }),
+      el('div', { class: 'flex flex-wrap gap-3' }, [
+        UI.iconBtn('＋ 新下單', 'primary', function () { root.App.go('orders'); }),
+        UI.iconBtn('＋ 入庫', 'accent', function () { root.App.go('inventory'); }),
+        UI.iconBtn('生成發票', 'ghost', function () { root.App.go('invoices'); }),
+        UI.iconBtn('列印送貨單', 'ghost', function () { root.App.go('delivery'); })
+      ])
+    ]));
   }
 
-  function edit(c, container) {
-    var tiers = Store.all('pricingTiers');
-    var body = el('div', {}, [
-      UI.grid(2, [
-        UI.field({ key: 'name', label: '客戶名稱', type: 'text', required: true, value: c ? c.name : '' }),
-        UI.field({ key: 'contact', label: '聯絡人', type: 'text', value: c ? c.contact : '' })
+  function stat(label, value, icon, go) {
+    return el('button', { class: 'bg-white border border-indigo/10 p-5 text-left hover:border-terracotta transition-colors', onclick: function () { if (go) root.App.go(go); } }, [
+      el('div', { class: 'flex items-center justify-between' }, [
+        el('span', { class: 'text-2xl', text: icon }),
+        el('span', { class: 'font-serif text-4xl text-indigo', text: String(value) })
       ]),
-      UI.grid(2, [
-        UI.field({ key: 'email', label: 'Email', type: 'text', value: c ? c.email : '' }),
-        UI.field({ key: 'phone', label: '電話', type: 'text', value: c ? c.phone : '' })
-      ]),
-      UI.field({ key: 'address', label: '送貨地址', type: 'textarea', rows: 2, value: c ? c.address : '' }),
-      UI.grid(2, [
-        UI.field({ key: 'settlementType', label: '結算方式', type: 'select', options: [{ value: 'per_order', label: '單次結算' }, { value: 'monthly', label: '月結' }], value: c ? c.settlementType : 'per_order' }),
-        UI.field({ key: 'pricingTierId', label: '階梯價', type: 'select', options: [{ value: '', label: '標準價（無階梯）' }].concat(tiers.map(function (t) { return { value: t.id, label: t.name }; })), value: c ? c.pricingTierId : '' })
-      ])
+      el('p', { class: 'text-sm text-indigo/60 mt-2', text: label })
     ]);
-    UI.modal({
-      title: c ? '編輯客戶' : '新增客戶', width: 'max-w-2xl', body: body,
-      actions: [
-        { label: '取消', kind: 'ghost' },
-        { label: '儲存', kind: 'primary', onClick: function (close) {
-          var d = UI.readForm(body);
-          if (!d.name) { UI.toast('請輸入名稱', 'err'); return false; }
-          if (c) Store.update('customers', c.id, d); else Store.insert('customers', d);
-          UI.toast('已儲存', 'ok'); close(); render(container);
-        } }
-      ]
-    });
+  }
+  function alertCard(kind, title, sub, cta, go) {
+    var ring = { ok: 'border-emerald-200 bg-emerald-50', warn: 'border-amber-300 bg-amber-50', err: 'border-red-300 bg-red-50' }[kind];
+    return el('div', { class: 'border ' + ring + ' p-4 flex flex-col justify-between' }, [
+      el('div', {}, [el('p', { class: 'font-bold text-indigo', text: title }), el('p', { class: 'text-sm text-indigo/70 mt-1', text: sub })]),
+      cta ? el('button', { class: 'text-terracotta hover:underline text-sm font-bold mt-3 text-left', text: cta + ' →', onclick: function () { root.App.go(go); } }) : null
+    ]);
   }
 
   root.Modules = root.Modules || {};
-  root.Modules.customers = { id: 'customers', label: '客戶', icon: '👥', render: render };
+  root.Modules.dashboard = { id: 'dashboard', label: '總覽', icon: '📊', render: render };
 
 })(typeof window !== 'undefined' ? window : this);

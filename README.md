@@ -1,75 +1,67 @@
-<!-- Delights HK — Inventory / Ordering System (client-side, cloud-ready) -->
-<!DOCTYPE html>
-<html lang="zh-HK">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>帝樂倉存系統 | Delights HK Inventory</title>
-    <script>
-        tailwind = window.tailwind || {};
-        window.tailwind = { config: { theme: { extend: {
-            colors: { 'indigo': '#1d3557', 'terracotta': '#b86a48', 'rice-paper': '#edeae5' },
-            fontFamily: { 'serif': ['Baskervville', 'Georgia', 'serif'], 'sans': ['Helvetica Now Text', 'Helvetica', 'Arial', 'sans-serif'] }
-        } } } };
-    </script>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Baskervville:ital@0;1&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
-    <style>
-        body { font-family: 'Noto Sans TC', 'Helvetica Now Text', Helvetica, Arial, sans-serif; }
-        .font-serif { font-family: 'Baskervville', Georgia, serif; }
-        ::-webkit-scrollbar { width: 8px; height: 8px; }
-        ::-webkit-scrollbar-thumb { background: #1d355733; border-radius: 4px; }
-    </style>
-</head>
-<body class="bg-rice-paper text-indigo min-h-screen">
+-- ============================================================================
+-- 帝樂倉存系統 · Supabase 建置 SQL（最終整合版 · row-level）
+-- 喺 Supabase → SQL Editor 貼上並執行（一次過）。
+--
+-- 儲存模型（見 inventory/DATABASE.md）：每份文件一行，data 係 jsonb。
+--   collection = 'orders'/'products'/'settings'…；singleton 用 doc_id='_doc'。
+-- 逐行 upsert → 兩個人改「不同記錄」互不覆蓋（並發安全）；支援動態欄位。
+-- ============================================================================
 
-    <div class="flex min-h-screen">
-        <!-- Sidebar -->
-        <aside id="inv-side" class="fixed md:static z-40 w-64 bg-rice-paper border-r border-indigo/10 h-screen md:h-auto md:min-h-screen flex flex-col transition-transform -translate-x-full md:translate-x-0">
-            <div class="px-5 py-5 border-b border-indigo/10">
-                <a href="./index.html" class="font-serif text-xl font-bold tracking-wider text-indigo">DELIGHTS HK</a>
-                <p class="text-xs text-indigo/50 mt-1">倉存 · 下單 · 發票系統</p>
-            </div>
-            <nav id="inv-nav" class="flex-1 py-3 space-y-0.5 overflow-y-auto"></nav>
-            <div class="px-5 py-3 border-t border-indigo/10 text-xs text-indigo/40">
-                資料儲存於此瀏覽器<br>記得定期匯出備份
-            </div>
-        </aside>
+create table if not exists public.inventory_docs (
+  collection  text        not null,
+  doc_id      text        not null,          -- 文件 id；singleton 用 '_doc'
+  data        jsonb       not null default '{}'::jsonb,
+  deleted     boolean     not null default false,
+  updated_at  timestamptz not null default now(),
+  primary key (collection, doc_id)
+);
 
-        <!-- Main -->
-        <div class="flex-1 flex flex-col min-w-0">
-            <header class="md:hidden sticky top-0 z-30 bg-rice-paper border-b border-indigo/10 px-4 py-3 flex items-center justify-between">
-                <button id="inv-nav-toggle" class="text-indigo" aria-label="menu">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"></path></svg>
-                </button>
-                <span class="font-serif font-bold">帝樂倉存系統</span>
-                <span class="w-6"></span>
-            </header>
-            <main id="inv-main" class="flex-1 p-5 md:p-8 max-w-6xl w-full mx-auto"></main>
-        </div>
-    </div>
+create index if not exists inv_docs_collection_idx on public.inventory_docs (collection) where not deleted;
 
-    <!-- App scripts (order matters) -->
-    <!-- Supabase client (optional cloud sync; app runs local-only if unavailable) -->
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-    <script src="js/vendor/qrcode.js"></script>
-    <script src="js/store.js"></script>
-    <script src="js/ui.js"></script>
-    <script src="js/biz.js"></script>
-    <script src="js/adapters/supabase-adapter.js"></script>
-    <script src="js/modules/dashboard.js"></script>
-    <script src="js/modules/products.js"></script>
-    <script src="js/modules/customers.js"></script>
-    <script src="js/modules/orders.js"></script>
-    <script src="js/modules/inventory.js"></script>
-    <script src="js/modules/delivery.js"></script>
-    <script src="js/modules/labels.js"></script>
-    <script src="js/modules/invoices.js"></script>
-    <script src="js/modules/queue.js"></script>
-    <script src="js/modules/sieve.js"></script>
-    <script src="js/modules/settings.js"></script>
-    <script src="js/app.js"></script>
-</body>
-</html>
+alter table public.inventory_docs enable row level security;
+
+-- ---------------------------------------------------------------------------
+-- 方案 A（預設・建議）：只有「已登入」用戶可讀寫。配合前端 Email/密碼登入。
+-- ---------------------------------------------------------------------------
+drop policy if exists "inv_docs_auth_all" on public.inventory_docs;
+create policy "inv_docs_auth_all"
+  on public.inventory_docs
+  for all
+  to authenticated
+  using (auth.uid() is not null)
+  with check (auth.uid() is not null);
+
+-- ---------------------------------------------------------------------------
+-- 方案 B（免登入・唔建議放敏感資料）：任何持 anon key 者可讀寫。
+-- 要用先喺前端設定剔「改用 anon 免登入」，並改用以下 policy（先移除方案 A）：
+-- ---------------------------------------------------------------------------
+-- drop policy if exists "inv_docs_auth_all" on public.inventory_docs;
+-- create policy "inv_docs_anon_all"
+--   on public.inventory_docs for all to anon using (true) with check (true);
+
+-- ---------------------------------------------------------------------------
+-- Realtime：多機即時同步。
+-- ---------------------------------------------------------------------------
+alter publication supabase_realtime add table public.inventory_docs;
+
+-- 自動更新 updated_at
+create or replace function public.inv_touch_updated_at()
+returns trigger language plpgsql as $$
+begin new.updated_at = now(); return new; end; $$;
+
+drop trigger if exists inv_docs_touch on public.inventory_docs;
+create trigger inv_docs_touch before update on public.inventory_docs
+  for each row execute function public.inv_touch_updated_at();
+
+-- ============================================================================
+-- 建立員工帳號（方案 A）：
+--   Supabase → Authentication → Users → Add user（email + 密碼）。
+--   並喺 Authentication → Providers → Email 關閉「Allow new users to sign up」。
+--
+-- 前端設定：倉存系統 → 設定 → 雲端同步，填 Project URL 同 anon key
+--   （Supabase → Project Settings → API 搵到）。
+--
+-- 由舊版（inventory_store，整 collection blob）升級者：
+--   舊表可保留作備份；新版只用 inventory_docs。首次連線時前端會把本地資料
+--   逐份文件推上新表。確認無誤後可 `drop table public.inventory_store;`。
+-- ============================================================================

@@ -1,239 +1,266 @@
 /*
- * store.js — data layer for the Delights inventory system.
- *
- * Cloud-ready by design: every read/write goes through an *adapter*. Today the
- * LocalAdapter persists to the browser's localStorage. To move to a backend,
- * implement the same three methods (readAll / writeAll / ready) against your
- * API/Firebase/Supabase and assign it to Store.adapter — no module needs to
- * change. Method signatures already return values that a Promise-based adapter
- * can wrap later; UI code treats them as synchronous for now.
+ * ui.js — shared UI helpers used by every module: DOM builders, form/field
+ * rendering, tables, modal, toast, formatting, tiered-price calculation, and
+ * the client-side label-protection password gate.
  */
 (function (root) {
   'use strict';
 
-  var NS = 'delights_inv_v1';
-
-  // ---- Local storage adapter ----------------------------------------------
-  var LocalAdapter = {
-    ready: function () { return true; },
-    readAll: function (collection) {
-      try {
-        var raw = localStorage.getItem(NS + ':' + collection);
-        return raw ? JSON.parse(raw) : null;
-      } catch (e) { return null; }
-    },
-    writeAll: function (collection, data) {
-      localStorage.setItem(NS + ':' + collection, JSON.stringify(data));
-      return true;
-    },
-    keys: function () {
-      var out = [];
-      for (var i = 0; i < localStorage.length; i++) {
-        var k = localStorage.key(i);
-        if (k && k.indexOf(NS + ':') === 0) out.push(k.slice(NS.length + 1));
-      }
-      return out;
-    }
-  };
-
-  // ---- ID + helpers --------------------------------------------------------
-  function uid(prefix) {
-    return (prefix || 'id') + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  function el(tag, attrs, children) {
+    var node = document.createElement(tag);
+    attrs = attrs || {};
+    Object.keys(attrs).forEach(function (k) {
+      if (k === 'class') node.className = attrs[k];
+      else if (k === 'html') node.innerHTML = attrs[k];
+      else if (k === 'text') node.textContent = attrs[k];
+      else if (k.slice(0, 2) === 'on' && typeof attrs[k] === 'function') node.addEventListener(k.slice(2), attrs[k]);
+      else if (k === 'value') node.value = attrs[k];
+      else if (attrs[k] != null && attrs[k] !== false) node.setAttribute(k, attrs[k]);
+    });
+    (children || []).forEach(function (c) {
+      if (c == null) return;
+      node.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+    });
+    return node;
   }
-  function nowISO() { return new Date().toISOString(); }
 
-  var Store = {
-    adapter: LocalAdapter,
+  function fmtMoney(n, currency) {
+    n = Number(n || 0);
+    return (currency || 'HKD') + ' ' + n.toLocaleString('en-HK', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d)) return iso;
+    return d.toISOString().slice(0, 10);
+  }
+  function fmtDateTime(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d)) return iso;
+    return d.toISOString().slice(0, 16).replace('T', ' ');
+  }
+  function daysUntil(dateStr) {
+    if (!dateStr) return null;
+    var d = new Date(dateStr);
+    var today = new Date(); today.setHours(0, 0, 0, 0);
+    return Math.round((d - today) / 86400000);
+  }
 
-    // Generic collection access -------------------------------------------
-    all: function (collection) {
-      var data = this.adapter.readAll(collection);
-      return Array.isArray(data) ? data : [];
-    },
-    get: function (collection, id) {
-      return this.all(collection).find(function (r) { return r.id === id; }) || null;
-    },
-    saveAll: function (collection, rows) {
-      this.adapter.writeAll(collection, rows);
-      Store._emit(collection);
-      return rows;
-    },
-    insert: function (collection, row) {
-      var rows = this.all(collection);
-      if (!row.id) row.id = uid(collection.slice(0, 3));
-      row.createdAt = row.createdAt || nowISO();
-      row.updatedAt = nowISO();
-      rows.push(row);
-      this.saveAll(collection, rows);
-      return row;
-    },
-    update: function (collection, id, patch) {
-      var rows = this.all(collection);
-      var i = rows.findIndex(function (r) { return r.id === id; });
-      if (i < 0) return null;
-      rows[i] = Object.assign({}, rows[i], patch, { updatedAt: nowISO() });
-      this.saveAll(collection, rows);
-      return rows[i];
-    },
-    upsert: function (collection, row) {
-      if (row.id && this.get(collection, row.id)) return this.update(collection, row.id, row);
-      return this.insert(collection, row);
-    },
-    remove: function (collection, id) {
-      var rows = this.all(collection).filter(function (r) { return r.id !== id; });
-      this.saveAll(collection, rows);
-    },
+  // ---- Toast ---------------------------------------------------------------
+  function toast(msg, kind) {
+    var wrap = document.getElementById('toast-wrap');
+    if (!wrap) { wrap = el('div', { id: 'toast-wrap', class: 'fixed top-4 right-4 z-[100] space-y-2' }); document.body.appendChild(wrap); }
+    var colors = { ok: 'bg-emerald-600', err: 'bg-red-600', warn: 'bg-amber-600', info: 'bg-indigo' };
+    var t = el('div', { class: 'text-white px-4 py-3 shadow-lg text-sm ' + (colors[kind] || colors.info), text: msg });
+    wrap.appendChild(t);
+    setTimeout(function () { t.style.transition = 'opacity .4s'; t.style.opacity = '0'; setTimeout(function () { t.remove(); }, 400); }, 2600);
+  }
 
-    // Settings (single object) --------------------------------------------
-    settings: function () {
-      var s = this.adapter.readAll('settings');
-      return Object.assign({}, DEFAULT_SETTINGS, s || {});
-    },
-    saveSettings: function (patch) {
-      var next = Object.assign({}, this.settings(), patch);
-      this.adapter.writeAll('settings', next);
-      Store._emit('settings');
-      return next;
-    },
+  // ---- Modal ---------------------------------------------------------------
+  function modal(opts) {
+    // opts: { title, body(node), width, actions:[{label,kind,onClick(close)}], onClose }
+    var overlay = el('div', { class: 'fixed inset-0 z-[90] bg-black/50 flex items-start justify-center overflow-auto py-8 px-4' });
+    var box = el('div', { class: 'bg-white w-full ' + (opts.width || 'max-w-2xl') + ' shadow-2xl my-auto' });
+    var head = el('div', { class: 'flex items-center justify-between px-6 py-4 border-b border-indigo/10' }, [
+      el('h3', { class: 'font-serif text-xl text-indigo', text: opts.title || '' }),
+      el('button', { class: 'text-indigo/50 hover:text-terracotta text-2xl leading-none', html: '&times;', onclick: function () { close(); } })
+    ]);
+    var bodyWrap = el('div', { class: 'px-6 py-5' }, [opts.body]);
+    var foot = el('div', { class: 'flex justify-end gap-2 px-6 py-4 border-t border-indigo/10 bg-rice-paper/40' });
+    (opts.actions || [{ label: '關閉', kind: 'ghost' }]).forEach(function (a) {
+      foot.appendChild(el('button', {
+        class: btnClass(a.kind),
+        text: a.label,
+        onclick: function () { if (a.onClick) { if (a.onClick(close) === false) return; } else close(); }
+      }));
+    });
+    box.appendChild(head); box.appendChild(bodyWrap); box.appendChild(foot);
+    overlay.appendChild(box);
+    overlay.addEventListener('mousedown', function (e) { if (e.target === overlay) close(); });
+    document.body.appendChild(overlay);
+    function close() { overlay.remove(); if (opts.onClose) opts.onClose(); }
+    return { close: close, box: box };
+  }
 
-    // Sequential document numbers -----------------------------------------
-    nextSeq: function (name, prefix) {
-      var counters = this.adapter.readAll('_seq') || {};
-      counters[name] = (counters[name] || 0) + 1;
-      this.adapter.writeAll('_seq', counters);
-      var n = String(counters[name]).padStart(4, '0');
-      var y = new Date().getFullYear();
-      return (prefix || name.toUpperCase()) + '-' + y + '-' + n;
-    },
+  function btnClass(kind) {
+    var base = 'px-4 py-2 text-sm font-bold transition-colors ';
+    switch (kind) {
+      case 'primary': return base + 'bg-indigo text-white hover:bg-terracotta';
+      case 'accent': return base + 'bg-terracotta text-white hover:bg-terracotta/90';
+      case 'danger': return base + 'bg-red-600 text-white hover:bg-red-700';
+      case 'ghost': return base + 'border border-indigo/20 text-indigo hover:bg-indigo/5';
+      default: return base + 'border border-indigo/20 text-indigo hover:bg-indigo/5';
+    }
+  }
 
-    // Change notification (very light pub/sub) ----------------------------
-    _subs: [],
-    subscribe: function (fn) { this._subs.push(fn); return function () {}; },
-    _emit: function (collection) { this._subs.forEach(function (f) { try { f(collection); } catch (e) {} }); },
+  function confirmModal(message, onYes, opts) {
+    opts = opts || {};
+    modal({
+      title: opts.title || '確認',
+      width: 'max-w-md',
+      body: el('p', { class: 'text-indigo/80', text: message }),
+      actions: [
+        { label: '取消', kind: 'ghost' },
+        { label: opts.yesLabel || '確定', kind: opts.danger ? 'danger' : 'primary', onClick: function (close) { onYes(); close(); } }
+      ]
+    });
+  }
 
-    // Backup / restore -----------------------------------------------------
-    exportAll: function () {
-      var out = { _meta: { app: 'delights-inventory', version: 1, exportedAt: nowISO() } };
-      var cols = ['productSchema', 'products', 'customers', 'stockLots', 'orders',
-        'invoices', 'pricingTiers', 'sieveLog', 'queue', 'settings', '_seq'];
-      cols.forEach(function (c) {
-        var d = Store.adapter.readAll(c);
-        if (d != null) out[c] = d;
+  // ---- Form field rendering (drives the "form-style" UI) -------------------
+  // field: { key, label, type, options, unit, required, help, value }
+  function field(f) {
+    var id = 'f_' + f.key + '_' + Math.random().toString(36).slice(2, 6);
+    var input;
+    if (f.type === 'select') {
+      input = el('select', { id: id, class: inputClass(), 'data-key': f.key },
+        (f.options || []).map(function (o) {
+          var val = typeof o === 'object' ? o.value : o;
+          var lab = typeof o === 'object' ? o.label : o;
+          var opt = el('option', { value: val, text: lab });
+          if (String(f.value) === String(val)) opt.selected = true;
+          return opt;
+        }));
+    } else if (f.type === 'textarea') {
+      input = el('textarea', { id: id, class: inputClass(), rows: f.rows || 3, 'data-key': f.key });
+      input.value = f.value == null ? '' : f.value;
+    } else {
+      input = el('input', {
+        id: id, class: inputClass(), type: f.type || 'text', 'data-key': f.key,
+        step: f.type === 'number' ? (f.step || 'any') : null,
+        placeholder: f.placeholder || ''
       });
-      return out;
-    },
-    importAll: function (obj) {
-      if (!obj || obj._meta == null) throw new Error('唔係有效嘅備份檔案');
-      Object.keys(obj).forEach(function (c) {
-        if (c === '_meta') return;
-        Store.adapter.writeAll(c, obj[c]);
-      });
-      Store._emit('*');
-    },
-    resetAll: function () {
-      Store.adapter.keys().forEach(function (k) { localStorage.removeItem(NS + ':' + k); });
-      Store._emit('*');
-    },
-
-    uid: uid,
-    nowISO: nowISO
-  };
-
-  // ---- Default product schema (columns are user-editable) -----------------
-  // core:true fields cannot be deleted; users add/remove the rest freely.
-  var DEFAULT_SCHEMA = [
-    { key: 'sku', label: '貨品編號', type: 'text', core: true, required: true },
-    { key: 'name', label: '貨品名稱', type: 'text', core: true, required: true },
-    { key: 'category', label: '分類', type: 'text', core: true },
-    { key: 'unit', label: '單位', type: 'text', core: true },
-    { key: 'unitPrice', label: '標準單價', type: 'number', core: true, unit: 'HKD' },
-    { key: 'reorderLevel', label: '安全庫存', type: 'number', core: true },
-    { key: 'reorderQty', label: '每次補貨量', type: 'number', core: true },
-    { key: 'shelfLifeDays', label: '保存期(日)', type: 'number', core: true },
-    { key: 'supplierName', label: '供應商', type: 'text', core: true },
-    { key: 'supplierEmail', label: '供應商Email', type: 'text', core: true },
-    { key: 'weightPerBox', label: '每盒重量(kg)', type: 'number' },
-    { key: 'piecesPerBox', label: '每盒件數', type: 'number' }
-  ];
-
-  var DEFAULT_SETTINGS = {
-    companyName: '帝樂香港有限公司',
-    companyNameEn: 'Delights Hong Kong Limited',
-    companyAddress: '香港',
-    companyPhone: '',
-    companyEmail: 'wecarehk02@gmail.com',
-    companyBR: '',
-    currency: 'HKD',
-    expiryWarnDays: 14,            // warn this many days before expiry
-    reorderWebhook: '',            // optional POST endpoint for auto-reorder
-    defaultSupplierEmail: '',
-    protectPasswordHash: '',       // hash of the label-protection password
-    deliveryNoteFooter: '收貨人簽署 / Received by',
-    labelWidthMm: 100,
-    labelHeightMm: 70
-  };
-
-  Store.DEFAULT_SCHEMA = DEFAULT_SCHEMA;
-  Store.DEFAULT_SETTINGS = DEFAULT_SETTINGS;
-
-  // Exposed so a cloud adapter can wrap the local store as an offline cache.
-  Store.LocalAdapter = LocalAdapter;
-  Store.NS = NS;
-
-  // ---- Seed helpers --------------------------------------------------------
-  Store.ensureSeed = function () {
-    if (this.adapter.readAll('productSchema') == null) {
-      this.adapter.writeAll('productSchema', DEFAULT_SCHEMA);
+      input.value = f.value == null ? '' : f.value;
     }
-    if (this.adapter.readAll('products') == null) {
-      this.adapter.writeAll('products', SEED_PRODUCTS);
-    }
-    if (this.adapter.readAll('customers') == null) {
-      this.adapter.writeAll('customers', SEED_CUSTOMERS);
-    }
-    if (this.adapter.readAll('pricingTiers') == null) {
-      this.adapter.writeAll('pricingTiers', SEED_TIERS);
-    }
-    if (this.adapter.readAll('stockLots') == null) {
-      this.adapter.writeAll('stockLots', SEED_LOTS());
-    }
-    if (this.adapter.readAll('sieveLog') == null) {
-      this.adapter.writeAll('sieveLog', SEED_SIEVE());
-    }
-  };
-
-  var SEED_PRODUCTS = [
-    { id: 'prod_soup01', sku: 'DLH-SOUP-01', name: '米其林慢煮花膠雞湯', category: '湯品', unit: '盒', unitPrice: 128, reorderLevel: 40, reorderQty: 120, shelfLifeDays: 180, supplierName: '溫氏食品', supplierEmail: 'supply@wens.example', weightPerBox: 0.5, piecesPerBox: 1 },
-    { id: 'prod_sauce01', sku: 'DLH-SAUCE-01', name: '主廚秘製XO醬', category: '醬料', unit: '樽', unitPrice: 88, reorderLevel: 60, reorderQty: 200, shelfLifeDays: 365, supplierName: '溫氏食品', supplierEmail: 'supply@wens.example', weightPerBox: 0.25, piecesPerBox: 1 },
-    { id: 'prod_beef01', sku: 'DLH-BEEF-01', name: '慢煮和牛頰肉', category: '肉類', unit: '包', unitPrice: 168, reorderLevel: 30, reorderQty: 80, shelfLifeDays: 120, supplierName: '溫氏食品', supplierEmail: 'supply@wens.example', weightPerBox: 0.3, piecesPerBox: 2 }
-  ];
-
-  var SEED_CUSTOMERS = [
-    { id: 'cust_hotel', name: '半島酒店餐飲部', contact: 'F&B Manager', email: 'fb@hotel.example', address: '香港九龍尖沙咀梳士巴利道22號', settlementType: 'monthly', pricingTierId: 'tier_hotel' },
-    { id: 'cust_bistro', name: '中環 Bistro L', contact: '陳先生', email: 'order@bistrol.example', address: '香港中環威靈頓街1號', settlementType: 'per_order', pricingTierId: '' }
-  ];
-
-  var SEED_TIERS = [
-    { id: 'tier_hotel', name: '酒店合約價 (階梯)', tiers: [{ minQty: 0, discountPct: 0 }, { minQty: 50, discountPct: 5 }, { minQty: 100, discountPct: 10 }, { minQty: 300, discountPct: 15 }] }
-  ];
-
-  function SEED_LOTS() {
-    var today = new Date();
-    function daysFrom(d, n) { var x = new Date(d); x.setDate(x.getDate() + n); return x.toISOString(); }
-    return [
-      { id: 'lot_a', qrId: 'DLH-L-A1001', lotCode: 'A1001', productId: 'prod_soup01', qty: 24, unit: '盒', inboundTime: daysFrom(today, -160), outboundTime: '', weightPerBox: 0.5, piecesPerBox: 1, expiryDate: daysFrom(today, 20).slice(0, 10), storageLocation: '凍倉 A-3-2', sieveCount: 4, sieveReturned: 0, deliveryAddress: '', status: 'in_stock' },
-      { id: 'lot_b', qrId: 'DLH-L-B2002', lotCode: 'B2002', productId: 'prod_sauce01', qty: 60, unit: '樽', inboundTime: daysFrom(today, -30), outboundTime: '', weightPerBox: 0.25, piecesPerBox: 1, expiryDate: daysFrom(today, 335).slice(0, 10), storageLocation: '常溫倉 B-1-5', sieveCount: 6, sieveReturned: 2, deliveryAddress: '', status: 'in_stock' },
-      { id: 'lot_c', qrId: 'DLH-L-C3003', lotCode: 'C3003', productId: 'prod_beef01', qty: 12, unit: '包', inboundTime: daysFrom(today, -110), outboundTime: '', weightPerBox: 0.3, piecesPerBox: 2, expiryDate: daysFrom(today, 8).slice(0, 10), storageLocation: '冰倉 C-2-1', sieveCount: 3, sieveReturned: 0, deliveryAddress: '', status: 'in_stock' }
-    ];
+    var labelText = f.label + (f.required ? ' *' : '') + (f.unit ? ' (' + f.unit + ')' : '');
+    return el('div', { class: f.wrapClass || '' }, [
+      el('label', { class: 'block text-xs font-bold uppercase tracking-wide text-indigo/60 mb-1', for: id, text: labelText }),
+      input,
+      f.help ? el('p', { class: 'text-xs text-indigo/50 mt-1', text: f.help }) : null
+    ]);
+  }
+  function inputClass() {
+    return 'w-full border border-indigo/20 bg-white px-3 py-2 text-sm text-indigo focus:outline-none focus:border-terracotta';
   }
 
-  function SEED_SIEVE() {
-    var today = new Date().toISOString().slice(0, 10);
-    return [
-      { id: 'sv1', date: today, type: 'in', qty: 13, supplierName: '溫氏食品', note: '每日到貨篩' }
-    ];
+  // read all [data-key] inputs inside a container into an object
+  function readForm(container) {
+    var out = {};
+    container.querySelectorAll('[data-key]').forEach(function (inp) {
+      var k = inp.getAttribute('data-key');
+      var v = inp.value;
+      if (inp.type === 'number') v = v === '' ? '' : Number(v);
+      out[k] = v;
+    });
+    return out;
   }
 
-  root.Store = Store;
+  function grid(cols, nodes) {
+    return el('div', { class: 'grid grid-cols-1 md:grid-cols-' + cols + ' gap-4' }, nodes);
+  }
+
+  // ---- Table ---------------------------------------------------------------
+  // columns: [{label, render(row)->string|node, class}], rows, opts:{empty}
+  function table(columns, rows, opts) {
+    opts = opts || {};
+    var thead = el('thead', {}, [el('tr', { class: 'text-left border-b-2 border-indigo/20' },
+      columns.map(function (c) { return el('th', { class: 'py-2 px-3 text-xs font-bold uppercase tracking-wide text-indigo/60 ' + (c.class || ''), text: c.label }); }))]);
+    var tbody = el('tbody', {}, rows.length ? rows.map(function (row) {
+      return el('tr', { class: 'border-b border-indigo/10 hover:bg-rice-paper/50' },
+        columns.map(function (c) {
+          var content = c.render ? c.render(row) : row[c.key];
+          var td = el('td', { class: 'py-2 px-3 text-sm align-top ' + (c.class || '') });
+          if (content == null) content = '';
+          if (typeof content === 'string' || typeof content === 'number') td.innerHTML = String(content);
+          else td.appendChild(content);
+          return td;
+        }));
+    }) : [el('tr', {}, [el('td', { class: 'py-8 text-center text-indigo/40', colspan: columns.length, text: opts.empty || '暫無資料' })])]);
+    return el('div', { class: 'overflow-x-auto' }, [el('table', { class: 'w-full min-w-full' }, [thead, tbody])]);
+  }
+
+  function badge(text, kind) {
+    var colors = {
+      ok: 'bg-emerald-100 text-emerald-800', warn: 'bg-amber-100 text-amber-800',
+      err: 'bg-red-100 text-red-800', info: 'bg-indigo/10 text-indigo', muted: 'bg-gray-100 text-gray-600'
+    };
+    return '<span class="inline-block px-2 py-0.5 text-xs font-bold rounded-sm ' + (colors[kind] || colors.info) + '">' + text + '</span>';
+  }
+
+  function sectionTitle(title, subtitle, right) {
+    return el('div', { class: 'flex items-end justify-between mb-6 flex-wrap gap-3' }, [
+      el('div', {}, [
+        el('h2', { class: 'font-serif text-2xl md:text-3xl text-indigo', text: title }),
+        subtitle ? el('p', { class: 'text-indigo/60 text-sm mt-1', text: subtitle }) : null
+      ]),
+      right || null
+    ]);
+  }
+
+  function iconBtn(label, kind, onClick) {
+    return el('button', { class: btnClass(kind), text: label, onclick: onClick });
+  }
+
+  // ---- Tiered pricing (跳bar) ----------------------------------------------
+  // A tier defines quantity breakpoints with a discount %. Given a base price
+  // and quantity, returns the effective unit price after the best applicable
+  // discount. Editable per invoice line downstream.
+  function tierPrice(basePrice, qty, tier) {
+    basePrice = Number(basePrice || 0);
+    if (!tier || !tier.tiers || !tier.tiers.length) return { unit: basePrice, discountPct: 0, band: null };
+    var applicable = tier.tiers
+      .filter(function (t) { return qty >= Number(t.minQty || 0); })
+      .sort(function (a, b) { return Number(b.minQty) - Number(a.minQty); })[0];
+    if (!applicable) return { unit: basePrice, discountPct: 0, band: null };
+    var pct = Number(applicable.discountPct || 0);
+    var unit = Math.round(basePrice * (1 - pct / 100) * 100) / 100;
+    return { unit: unit, discountPct: pct, band: applicable };
+  }
+
+  // ---- Label-protection password gate (client-side) ------------------------
+  // NOTE: browser-stored data is inherently readable by anyone with the
+  // device; this is a deterrent/operational lock (hides sensitive label
+  // fields behind a password prompt), not cryptographic security. Move the
+  // check server-side when the cloud adapter lands for true protection.
+  function simpleHash(str) {
+    var h = 5381;
+    for (var i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+    return 'h' + h.toString(16);
+  }
+  var _unlockedUntil = 0;
+  function isUnlocked() { return Date.now() < _unlockedUntil; }
+  function unlockFor(minutes) { _unlockedUntil = Date.now() + minutes * 60000; }
+  function requireUnlock(onOk) {
+    if (isUnlocked()) { onOk(); return; }
+    var s = root.Store.settings();
+    if (!s.protectPasswordHash) { // no password set yet -> allow, prompt to set one
+      onOk(); return;
+    }
+    var body = el('div', {}, [
+      el('p', { class: 'text-sm text-indigo/70 mb-3', text: '呢啲係受保護資料，請輸入密碼解鎖（15分鐘內有效）。' }),
+      field({ key: 'pw', label: '密碼', type: 'password' })
+    ]);
+    var m = modal({
+      title: '🔒 解鎖受保護資料', width: 'max-w-md', body: body,
+      actions: [
+        { label: '取消', kind: 'ghost' },
+        { label: '解鎖', kind: 'primary', onClick: function (close) {
+          var pw = readForm(body).pw || '';
+          if (simpleHash(pw) === s.protectPasswordHash) { unlockFor(15); close(); onOk(); }
+          else { toast('密碼錯誤', 'err'); return false; }
+        } }
+      ]
+    });
+    setTimeout(function () { var i = body.querySelector('input'); if (i) i.focus(); }, 50);
+  }
+
+  root.UI = {
+    el: el, fmtMoney: fmtMoney, fmtDate: fmtDate, fmtDateTime: fmtDateTime, daysUntil: daysUntil,
+    toast: toast, modal: modal, confirmModal: confirmModal, btnClass: btnClass,
+    field: field, readForm: readForm, grid: grid, table: table, badge: badge,
+    sectionTitle: sectionTitle, iconBtn: iconBtn, inputClass: inputClass,
+    tierPrice: tierPrice, simpleHash: simpleHash, requireUnlock: requireUnlock,
+    isUnlocked: isUnlocked, unlockFor: unlockFor
+  };
 
 })(typeof window !== 'undefined' ? window : this);

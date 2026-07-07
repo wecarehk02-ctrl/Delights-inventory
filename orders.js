@@ -1,212 +1,208 @@
-/* Module: 送貨單 (req 5) — delivery notes, print-optimised for Epson dot-matrix */
+/* Module: 庫存管理 — inbound stock, stock levels, reorder (req 3), expiry warnings (req 7) */
 (function (root) {
   'use strict';
-  var UI = root.UI, Store = root.Store, el = UI.el;
+  var UI = root.UI, Store = root.Store, Biz = root.Biz, el = UI.el;
 
   function productName(id) { var p = Store.get('products', id); return p ? p.name : id; }
-  function product(id) { return Store.get('products', id); }
-  function customer(id) { return Store.get('customers', id); }
 
   function render(container) {
-    var orders = Store.all('orders').slice().sort(function (a, b) { return (b.deliveryDate || '').localeCompare(a.deliveryDate || ''); });
     container.innerHTML = '';
-    container.appendChild(UI.sectionTitle('送貨單', '由訂單生成送貨單並用 Epson 針機列印', null));
+    container.appendChild(UI.sectionTitle('庫存管理', '入庫、即時庫存、補貨提示同到期警告', el('div', { class: 'flex gap-2' }, [
+      UI.iconBtn('＋ 入庫（新到貨）', 'primary', function () { inbound(null, container); })
+    ])));
 
+    // ---- alerts row ----
+    var low = Biz.lowStockItems();
+    var expiring = Biz.expiringLots();
+    var alerts = el('div', { class: 'grid grid-cols-1 md:grid-cols-3 gap-4 mb-6' }, [
+      statCard('低於安全庫存', low.length, low.length ? 'err' : 'ok', low.length ? '需要補貨' : '庫存充足'),
+      statCard('接近到期', expiring.filter(function (e) { return !e.expired; }).length, expiring.length ? 'warn' : 'ok', '＜ ' + Store.settings().expiryWarnDays + ' 日'),
+      statCard('已過期', expiring.filter(function (e) { return e.expired; }).length, expiring.some(function (e) { return e.expired; }) ? 'err' : 'ok', '需即時處理')
+    ]);
+    container.appendChild(alerts);
+
+    // ---- low stock / reorder ----
+    if (low.length) {
+      var reorderBtns = el('div', { class: 'flex gap-2 flex-wrap' }, [
+        UI.iconBtn('✉ 生成補貨 Email', 'accent', function () { var m = Biz.reorderEmail(low); window.location.href = Biz.mailtoLink(m); }),
+        UI.iconBtn('⇪ POST Webhook', 'ghost', function () {
+          Biz.sendRestockOrQueue(low).then(function (r) { UI.toast(r.sent ? '已送出補貨要求' : '已存入任務佇列', r.sent ? 'ok' : 'warn'); });
+        })
+      ]);
+      var lowCols = [
+        { label: '貨品', render: function (s) { return '<b>' + s.product.name + '</b>'; } },
+        { label: '現存', class: 'text-right', render: function (s) { return '<span class="text-red-600 font-bold">' + s.qty + '</span> ' + (s.product.unit || ''); } },
+        { label: '安全庫存', class: 'text-right', render: function (s) { return String(s.reorderLevel); } },
+        { label: '建議補貨', class: 'text-right', render: function (s) { return (s.product.reorderQty || '—') + ' ' + (s.product.unit || ''); } },
+        { label: '供應商', render: function (s) { return s.product.supplierName || '—'; } }
+      ];
+      container.appendChild(el('div', { class: 'bg-white border-l-4 border-red-500 border border-indigo/10 p-4 mb-6' }, [
+        el('div', { class: 'flex items-center justify-between mb-3 flex-wrap gap-2' }, [
+          el('h3', { class: 'font-serif text-lg text-indigo', text: '⚠ 補貨提示（' + low.length + '）' }), reorderBtns
+        ]),
+        UI.table(lowCols, low)
+      ]));
+    }
+
+    // ---- expiry warnings ----
+    if (expiring.length) {
+      var expCols = [
+        { label: '批次', render: function (e) { return e.lot.lotCode || e.lot.qrId; } },
+        { label: '貨品', render: function (e) { return productName(e.lot.productId); } },
+        { label: '數量', class: 'text-right', render: function (e) { return e.lot.qty + ' ' + (e.lot.unit || ''); } },
+        { label: '存放位置', render: function (e) { return e.lot.storageLocation || '—'; } },
+        { label: '到期日', render: function (e) { return UI.fmtDate(e.lot.expiryDate); } },
+        { label: '狀態', render: function (e) {
+          if (e.expired) return UI.badge('已過期 ' + Math.abs(e.days) + ' 日', 'err');
+          if (e.days <= 3) return UI.badge('剩 ' + e.days + ' 日', 'err');
+          return UI.badge('剩 ' + e.days + ' 日', 'warn');
+        } }
+      ];
+      container.appendChild(el('div', { class: 'bg-white border-l-4 border-amber-500 border border-indigo/10 p-4 mb-6' }, [
+        el('h3', { class: 'font-serif text-lg text-indigo mb-3', text: '⏰ 到期警告（' + expiring.length + '）' }),
+        UI.table(expCols, expiring)
+      ]));
+    }
+
+    // ---- full stock table ----
+    var summary = Biz.stockSummary();
     var cols = [
-      { label: '單號', render: function (o) { return '<b>' + o.orderNo + '</b>'; } },
-      { label: '客戶', render: function (o) { var c = customer(o.customerId); return c ? c.name : '—'; } },
-      { label: '送貨日', render: function (o) { return UI.fmtDate(o.deliveryDate); } },
-      { label: '送貨地址', class: 'max-w-xs', render: function (o) { return '<span class="text-indigo/70">' + (o.deliveryAddress || '—') + '</span>'; } },
-      { label: '項目', render: function (o) { return (o.lines || []).length + ' 項'; } },
-      { label: '操作', class: 'text-right whitespace-nowrap', render: function (o) {
+      { label: '貨品編號', render: function (s) { return s.product.sku || '—'; } },
+      { label: '名稱', render: function (s) { return '<b>' + s.product.name + '</b>'; } },
+      { label: '分類', render: function (s) { return s.product.category || '—'; } },
+      { label: '現存', class: 'text-right', render: function (s) {
+        return '<span class="' + (s.low ? 'text-red-600 font-bold' : 'text-indigo') + '">' + s.qty + '</span> ' + (s.product.unit || ''); } },
+      { label: '安全庫存', class: 'text-right', render: function (s) { return String(s.reorderLevel || '—'); } },
+      { label: '批次數', class: 'text-right', render: function (s) { return String(Biz.lotsForProduct(s.product.id).length); } }
+    ];
+    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4 mb-6' }, [
+      el('h3', { class: 'font-serif text-lg text-indigo mb-3', text: '即時庫存' }),
+      UI.table(cols, summary, { empty: '未有產品。' })
+    ]));
+
+    // ---- lots list ----
+    var lots = Store.all('stockLots').filter(function (l) { return l.status !== 'shipped'; });
+    var lotCols = [
+      { label: '批次', render: function (l) { return '<b>' + (l.lotCode || l.qrId) + '</b>'; } },
+      { label: '貨品', render: function (l) { return productName(l.productId); } },
+      { label: '數量', class: 'text-right', render: function (l) { return l.qty + ' ' + (l.unit || ''); } },
+      { label: '入庫時間', render: function (l) { return UI.fmtDate(l.inboundTime); } },
+      { label: '到期日', render: function (l) { return UI.fmtDate(l.expiryDate); } },
+      { label: '位置', render: function (l) { return l.storageLocation || '—'; } },
+      { label: '篩', class: 'text-right', render: function (l) { return (l.sieveReturned || 0) + '/' + (l.sieveCount || 0); } },
+      { label: '操作', class: 'text-right whitespace-nowrap', render: function (l) {
         return el('div', { class: 'flex gap-2 justify-end' }, [
-          el('button', { class: 'text-indigo hover:underline text-xs', text: '預覽', onclick: function () { preview(o.id); } }),
-          el('button', { class: 'text-terracotta hover:underline text-xs', text: '🖨 列印', onclick: function () { doPrint(o.id); } })
+          el('button', { class: 'text-indigo hover:underline text-xs', text: '標籤', onclick: function () { root.Modules.labels.printLot(l.id); } }),
+          el('button', { class: 'text-terracotta hover:underline text-xs', text: '編輯', onclick: function () { inbound(l, container); } }),
+          el('button', { class: 'text-red-600 hover:underline text-xs', text: '刪除', onclick: function () {
+            UI.confirmModal('刪除批次 ' + (l.lotCode || l.qrId) + '？', function () { Store.remove('stockLots', l.id); render(container); }, { danger: true });
+          } })
         ]);
       } }
     ];
-    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4' }, [UI.table(cols, orders, { empty: '未有訂單。' })]));
-
-    container.appendChild(el('div', { class: 'mt-4 text-xs text-indigo/50' }, [
-      el('p', { text: '針機提示：於列印對話框選擇 Epson 針機，紙張選「連續紙 / Continuous」或對應尺寸，邊界設為最小。可於「設定」調整公司資料同頁尾。' })
+    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4' }, [
+      el('h3', { class: 'font-serif text-lg text-indigo mb-3', text: '庫存批次' }),
+      UI.table(lotCols, lots, { empty: '未有庫存批次。' })
     ]));
   }
 
-  // Build delivery-note HTML string (self-contained, B&W, dot-matrix friendly)
-  function noteHTML(order) {
-    var s = Store.settings();
-    var c = customer(order.customerId) || {};
-    var rows = (order.lines || []).map(function (l, i) {
-      var p = product(l.productId) || {};
-      var amt = Number(l.qty || 0) * Number(l.unitPrice || 0);
-      return '<tr>' +
-        '<td class="c">' + (i + 1) + '</td>' +
-        '<td>' + (p.sku || '') + '</td>' +
-        '<td>' + (p.name || l.productId) + '</td>' +
-        '<td class="r">' + l.qty + '</td>' +
-        '<td>' + (p.unit || '') + '</td>' +
-        '<td class="r">' + Number(l.unitPrice || 0).toFixed(2) + '</td>' +
-        '<td class="r">' + amt.toFixed(2) + '</td>' +
-        '</tr>';
-    }).join('');
-    var total = (order.lines || []).reduce(function (a, l) { return a + Number(l.qty || 0) * Number(l.unitPrice || 0); }, 0);
-    var totalQty = (order.lines || []).reduce(function (a, l) { return a + Number(l.qty || 0); }, 0);
-
-    return '' +
-      '<div class="dn">' +
-      '<div class="dn-head">' +
-        '<div><div class="dn-co">' + s.companyName + '</div>' +
-        '<div class="dn-co-en">' + (s.companyNameEn || '') + '</div>' +
-        '<div class="dn-sm">' + (s.companyAddress || '') + '</div>' +
-        '<div class="dn-sm">Tel: ' + (s.companyPhone || '') + (s.companyBR ? '　BR: ' + s.companyBR : '') + '</div></div>' +
-        '<div class="dn-title">送 貨 單<br><span class="dn-title-en">DELIVERY NOTE</span></div>' +
-      '</div>' +
-      '<table class="dn-meta"><tr>' +
-        '<td><b>送貨單號 No.:</b> ' + order.orderNo + '</td>' +
-        '<td><b>下單日 Order:</b> ' + UI.fmtDate(order.orderDate) + '</td>' +
-        '<td><b>送貨日 Delivery:</b> ' + UI.fmtDate(order.deliveryDate) + '</td>' +
-      '</tr></table>' +
-      '<table class="dn-cust"><tr>' +
-        '<td><b>客戶 Customer:</b> ' + (c.name || '') + '<br><b>聯絡 Contact:</b> ' + (c.contact || '') + '</td>' +
-        '<td><b>送貨地址 Deliver to:</b><br>' + (order.deliveryAddress || c.address || '') + '</td>' +
-      '</tr></table>' +
-      '<table class="dn-items">' +
-        '<thead><tr><th>#</th><th>編號 Code</th><th>貨品 Description</th><th class="r">數量 Qty</th><th>單位</th><th class="r">單價</th><th class="r">金額 Amount</th></tr></thead>' +
-        '<tbody>' + rows + '</tbody>' +
-        '<tfoot><tr><td colspan="3" class="r"><b>合計 Total</b></td><td class="r"><b>' + totalQty + '</b></td><td></td><td></td><td class="r"><b>' + total.toFixed(2) + '</b></td></tr></tfoot>' +
-      '</table>' +
-      (order.note ? '<div class="dn-note"><b>備註 Remarks:</b> ' + order.note + '</div>' : '') +
-      '<table class="dn-sign"><tr>' +
-        '<td>發貨人 Issued by:<br><br>______________</td>' +
-        '<td>司機 Driver:<br><br>______________</td>' +
-        '<td>' + (s.deliveryNoteFooter || '收貨人簽署 Received by') + ':<br><br>______________</td>' +
-      '</tr></table>' +
-      '<div class="dn-foot">此送貨單一式兩份，收貨後請簽回一份。 Printed ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + '</div>' +
-      '</div>';
+  function statCard(title, value, kind, sub) {
+    var ring = { ok: 'border-emerald-200', warn: 'border-amber-300', err: 'border-red-300' }[kind] || 'border-indigo/10';
+    var col = { ok: 'text-emerald-600', warn: 'text-amber-600', err: 'text-red-600' }[kind] || 'text-indigo';
+    return el('div', { class: 'bg-white border ' + ring + ' p-4' }, [
+      el('p', { class: 'text-xs uppercase tracking-wide text-indigo/50', text: title }),
+      el('p', { class: 'font-serif text-3xl ' + col, text: String(value) }),
+      el('p', { class: 'text-xs text-indigo/40', text: sub })
+    ]);
   }
 
-  function noteCSS() {
-    return '<style>' +
-      '*{box-sizing:border-box;}' +
-      'body{margin:0;font-family:"Courier New",Courier,"Noto Sans TC",monospace;color:#000;font-size:11pt;}' +
-      '.dn{padding:6mm;max-width:200mm;}' +
-      '.dn-head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:2px solid #000;padding-bottom:2mm;}' +
-      '.dn-co{font-size:15pt;font-weight:bold;font-family:"Noto Sans TC",sans-serif;}' +
-      '.dn-co-en{font-size:9pt;letter-spacing:1px;}' +
-      '.dn-sm{font-size:8.5pt;}' +
-      '.dn-title{text-align:right;font-size:16pt;font-weight:bold;letter-spacing:3px;font-family:"Noto Sans TC",sans-serif;}' +
-      '.dn-title-en{font-size:8pt;letter-spacing:2px;}' +
-      '.dn-meta,.dn-cust,.dn-sign{width:100%;border-collapse:collapse;margin-top:2mm;}' +
-      '.dn-meta td{font-size:9.5pt;padding:1mm 0;}' +
-      '.dn-cust td{border:1px solid #000;padding:2mm;vertical-align:top;font-size:9.5pt;width:50%;}' +
-      '.dn-items{width:100%;border-collapse:collapse;margin-top:3mm;}' +
-      '.dn-items th,.dn-items td{border:1px solid #000;padding:1.5mm 2mm;font-size:9.5pt;}' +
-      '.dn-items th{background:#eee;font-family:"Noto Sans TC",sans-serif;}' +
-      '.dn-items .r,.r{text-align:right;}.dn-items .c,.c{text-align:center;}' +
-      '.dn-note{margin-top:2mm;font-size:9.5pt;border:1px solid #000;padding:2mm;}' +
-      '.dn-sign{margin-top:8mm;}' +
-      '.dn-sign td{width:33%;font-size:9pt;padding:2mm;vertical-align:top;}' +
-      '.dn-foot{margin-top:4mm;font-size:8pt;text-align:center;border-top:1px dashed #000;padding-top:1mm;}' +
-      '@media print{.dn{padding:4mm;}@page{margin:6mm;}}' +
-      '</style>';
-  }
+  // ---- Inbound (new arrival) form: creates a lot + sieve entry ------------
+  function inbound(lot, container) {
+    var products = Store.all('products');
+    var isEdit = !!lot;
+    var body = el('div', {});
 
-  // ---- Plain-text delivery note for dot-matrix continuous paper ----------
-  // CJK characters occupy 2 columns in a monospace / dot-matrix font.
-  function dispWidth(s) { var w = 0; for (var i = 0; i < s.length; i++) { w += s.charCodeAt(i) > 0x2e7f ? 2 : 1; } return w; }
-  function padEnd(s, n) { s = String(s == null ? '' : s); var w = dispWidth(s); if (w > n) { // truncate to fit
-      var out = '', ww = 0; for (var i = 0; i < s.length; i++) { var cw = s.charCodeAt(i) > 0x2e7f ? 2 : 1; if (ww + cw > n) break; out += s[i]; ww += cw; } return out + new Array(Math.max(0, n - ww) + 1).join(' '); }
-    return s + new Array(n - w + 1).join(' '); }
-  function padStart(s, n) { s = String(s == null ? '' : s); var w = dispWidth(s); return (w >= n ? s : new Array(n - w + 1).join(' ') + s); }
-  function rule(ch, width) { return new Array(width + 1).join(ch); }
+    var head = el('div', {}, [
+      UI.grid(2, [
+        UI.field({ key: 'productId', label: '產品', type: 'select', required: true,
+          options: [{ value: '', label: '— 選產品 —' }].concat(products.map(function (p) { return { value: p.id, label: p.name }; })),
+          value: lot ? lot.productId : '' }),
+        UI.field({ key: 'lotCode', label: '批次號', type: 'text', value: lot ? lot.lotCode : '', placeholder: '例如 A1001' })
+      ]),
+      UI.grid(3, [
+        UI.field({ key: 'qty', label: '數量', type: 'number', required: true, value: lot ? lot.qty : '' }),
+        UI.field({ key: 'unit', label: '單位', type: 'text', value: lot ? lot.unit : '' }),
+        UI.field({ key: 'storageLocation', label: '存放位置', type: 'text', value: lot ? lot.storageLocation : '' })
+      ]),
+      UI.grid(3, [
+        UI.field({ key: 'inboundTime', label: '入庫時間', type: 'date', value: lot ? (lot.inboundTime || '').slice(0, 10) : new Date().toISOString().slice(0, 10) }),
+        UI.field({ key: 'weightPerBox', label: '每盒重量', type: 'number', unit: 'kg', value: lot ? lot.weightPerBox : '' }),
+        UI.field({ key: 'piecesPerBox', label: '每盒件數', type: 'number', value: lot ? lot.piecesPerBox : '' })
+      ]),
+      UI.grid(3, [
+        UI.field({ key: 'expiryDate', label: '保存期限', type: 'date', value: lot ? lot.expiryDate : '', help: '留空會依產品保存期自動計算' }),
+        UI.field({ key: 'sieveCount', label: '本次篩數', type: 'number', value: lot ? lot.sieveCount : '', help: '到貨嘅篩數量' }),
+        UI.field({ key: 'deliveryAddress', label: '送貨地址(可選)', type: 'text', value: lot ? lot.deliveryAddress : '' })
+      ])
+    ]);
+    body.appendChild(head);
 
-  function noteText(order, width) {
-    var s = Store.settings(); var c = customer(order.customerId) || {};
-    var L = [];
-    L.push(padEnd(s.companyName, width - 18) + padStart('送貨單 DELIVERY NOTE', 18));
-    if (s.companyNameEn) L.push(s.companyNameEn);
-    if (s.companyAddress) L.push(s.companyAddress);
-    L.push('Tel: ' + (s.companyPhone || '') + (s.companyBR ? '   BR: ' + s.companyBR : ''));
-    L.push(rule('=', width));
-    L.push('單號 No.: ' + padEnd(order.orderNo, Math.max(10, width / 2 - 12)) + '下單 Order: ' + UI.fmtDate(order.orderDate));
-    L.push('客戶 To : ' + padEnd(c.name || '', Math.max(10, width / 2 - 12)) + '送貨 Deliv: ' + UI.fmtDate(order.deliveryDate));
-    L.push('送貨地址: ' + (order.deliveryAddress || c.address || ''));
-    L.push(rule('-', width));
-    // columns: # code desc qty unit price amount
-    var wNo = 3, wQty = 6, wUnit = 5, wPrice = 9, wAmt = 11;
-    var wDesc = width - wNo - wQty - wUnit - wPrice - wAmt - 5; if (wDesc < 10) wDesc = 10;
-    L.push(padEnd('#', wNo) + ' ' + padEnd('貨品 Description', wDesc) + ' ' + padStart('數量', wQty) + ' ' + padEnd('單位', wUnit) + ' ' + padStart('單價', wPrice) + ' ' + padStart('金額', wAmt));
-    L.push(rule('-', width));
-    var total = 0, totalQty = 0;
-    (order.lines || []).forEach(function (l, i) {
-      var p = product(l.productId) || {}; var amt = Number(l.qty || 0) * Number(l.unitPrice || 0); total += amt; totalQty += Number(l.qty || 0);
-      L.push(padEnd(i + 1, wNo) + ' ' + padEnd((p.name || l.productId), wDesc) + ' ' + padStart(l.qty, wQty) + ' ' + padEnd(p.unit || '', wUnit) + ' ' + padStart(Number(l.unitPrice || 0).toFixed(2), wPrice) + ' ' + padStart(amt.toFixed(2), wAmt));
+    // auto expiry when product changes
+    head.querySelector('[data-key=productId]').addEventListener('change', function (e) {
+      var p = Store.get('products', e.target.value);
+      var unit = head.querySelector('[data-key=unit]');
+      var wp = head.querySelector('[data-key=weightPerBox]');
+      var pp = head.querySelector('[data-key=piecesPerBox]');
+      var exp = head.querySelector('[data-key=expiryDate]');
+      if (p) {
+        if (!unit.value) unit.value = p.unit || '';
+        if (!wp.value && p.weightPerBox) wp.value = p.weightPerBox;
+        if (!pp.value && p.piecesPerBox) pp.value = p.piecesPerBox;
+        if (!exp.value && p.shelfLifeDays) {
+          var ib = head.querySelector('[data-key=inboundTime]').value || new Date().toISOString().slice(0, 10);
+          var d = new Date(ib); d.setDate(d.getDate() + Number(p.shelfLifeDays)); exp.value = d.toISOString().slice(0, 10);
+        }
+      }
     });
-    L.push(rule('-', width));
-    L.push(padStart('合計 Total:', width - wAmt - wQty - 8) + ' ' + padStart(totalQty, wQty) + '        ' + padStart(total.toFixed(2), wAmt));
-    if (order.note) L.push('備註 Remarks: ' + order.note);
-    L.push(rule('=', width));
-    L.push('');
-    L.push('發貨 Issued: ____________   司機 Driver: ____________   收貨 Received: ____________');
-    L.push('');
-    L.push(padStart('Printed ' + new Date().toISOString().slice(0, 16).replace('T', ' '), width));
-    return L.join('\n');
-  }
-
-  function printText(orderId, width) {
-    var order = Store.get('orders', orderId); if (!order) return;
-    var txt = noteText(order, width);
-    var w = window.open('', '_blank', 'width=780,height=900');
-    w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>DN ' + order.orderNo + '</title>' +
-      '<style>@page{margin:6mm;}body{margin:0;}pre{font-family:"Courier New",monospace;font-size:10pt;line-height:1.2;white-space:pre;}</style></head><body><pre>' +
-      txt.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre></body></html>');
-    w.document.close(); w.focus(); setTimeout(function () { w.print(); }, 300);
-  }
-
-  function preview(orderId) {
-    var order = Store.get('orders', orderId);
-    if (!order) return;
-    var mode = { type: 'html', width: 80 };
-    var toolbar = el('div', { class: 'flex items-center gap-2 mb-3 flex-wrap' });
-    var wrap = el('div', { class: 'bg-white border border-indigo/10', style: 'max-height:65vh;overflow:auto;' });
-
-    function draw() {
-      if (mode.type === 'html') { wrap.innerHTML = noteCSS() + noteHTML(order); }
-      else {
-        wrap.innerHTML = '';
-        wrap.appendChild(el('pre', { class: 'p-3 text-xs', style: 'font-family:"Courier New",monospace;white-space:pre;', text: noteText(order, mode.width) }));
-      }
-    }
-    function drawToolbar() {
-      toolbar.innerHTML = '';
-      function tab(label, active, on) { return el('button', { class: 'px-3 py-1 text-sm border ' + (active ? 'bg-indigo text-white border-indigo' : 'border-indigo/20 text-indigo hover:bg-indigo/5'), text: label, onclick: on }); }
-      toolbar.appendChild(tab('HTML 版', mode.type === 'html', function () { mode.type = 'html'; drawToolbar(); draw(); }));
-      toolbar.appendChild(tab('純文字 (針機)', mode.type === 'text', function () { mode.type = 'text'; drawToolbar(); draw(); }));
-      if (mode.type === 'text') {
-        toolbar.appendChild(el('span', { class: 'text-xs text-indigo/50 ml-2', text: '欄寬：' }));
-        [80, 96, 132].forEach(function (w) { toolbar.appendChild(tab(w + '欄', mode.width === w, function () { mode.width = w; drawToolbar(); draw(); })); });
-      }
-    }
-    drawToolbar(); draw();
 
     UI.modal({
-      title: '送貨單預覽 ' + order.orderNo, width: 'max-w-4xl', body: el('div', {}, [toolbar, wrap]),
-      actions: [{ label: '關閉', kind: 'ghost' }, { label: '🖨 列印', kind: 'primary', onClick: function (close) {
-        if (mode.type === 'html') doPrint(orderId); else printText(orderId, mode.width);
-      } }]
+      title: isEdit ? '編輯批次' : '入庫（新到貨）', width: 'max-w-3xl', body: body,
+      actions: [
+        { label: '取消', kind: 'ghost' },
+        { label: isEdit ? '儲存' : '確認入庫', kind: 'primary', onClick: function (close) {
+          var d = UI.readForm(head);
+          if (!d.productId) { UI.toast('請選擇產品', 'err'); return false; }
+          if (!d.qty) { UI.toast('請輸入數量', 'err'); return false; }
+          // auto expiry
+          if (!d.expiryDate) {
+            var p = Store.get('products', d.productId);
+            if (p && p.shelfLifeDays) { var dd = new Date(d.inboundTime || Date.now()); dd.setDate(dd.getDate() + Number(p.shelfLifeDays)); d.expiryDate = dd.toISOString().slice(0, 10); }
+          }
+          d.inboundTime = d.inboundTime ? new Date(d.inboundTime).toISOString() : Store.nowISO();
+          if (isEdit) {
+            Store.update('stockLots', lot.id, d);
+          } else {
+            var code = d.lotCode || ('L' + Date.now().toString(36).slice(-5).toUpperCase());
+            d.lotCode = code;
+            d.qrId = 'DLH-L-' + code;
+            d.sieveReturned = 0;
+            d.status = 'in_stock';
+            var newLot = Store.insert('stockLots', d);
+            // record sieve intake (req 8)
+            if (Number(d.sieveCount) > 0) {
+              var prod = Store.get('products', d.productId);
+              Store.insert('sieveLog', { date: (d.inboundTime || '').slice(0, 10), type: 'in', qty: Number(d.sieveCount), supplierName: prod ? prod.supplierName : '', note: '到貨批次 ' + code });
+            }
+            lot = newLot;
+          }
+          UI.toast('已入庫', 'ok'); close(); render(container);
+          UI.confirmModal('要即刻列印此批次嘅 QR 標籤嗎？', function () { root.Modules.labels.printLot(lot.id); });
+        } }
+      ]
     });
-  }
-
-  function doPrint(orderId) {
-    var order = Store.get('orders', orderId);
-    if (!order) { UI.toast('搵唔到訂單', 'err'); return; }
-    var w = window.open('', '_blank', 'width=800,height=900');
-    w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>DN ' + order.orderNo + '</title>' + noteCSS() + '</head><body>' + noteHTML(order) + '</body></html>');
-    w.document.close(); w.focus();
-    setTimeout(function () { w.print(); }, 350);
   }
 
   root.Modules = root.Modules || {};
-  root.Modules.delivery = { id: 'delivery', label: '送貨單', icon: '🚚', render: render, print: doPrint, preview: preview };
+  root.Modules.inventory = { id: 'inventory', label: '庫存管理', icon: '🏭', render: render, inbound: inbound };
 
 })(typeof window !== 'undefined' ? window : this);

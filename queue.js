@@ -1,273 +1,196 @@
-/* Module: 發票 (req 4) — invoices from sales, monthly settlement, tiered pricing, editable */
+/* Module: 標籤打印 (req 6) — per-lot QR label, protected fields + visible address */
 (function (root) {
   'use strict';
   var UI = root.UI, Store = root.Store, el = UI.el;
+  var QR = root.DELIGHTS_QR;
 
-  function customer(id) { return Store.get('customers', id); }
+  function productName(id) { var p = Store.get('products', id); return p ? p.name : id; }
   function product(id) { return Store.get('products', id); }
-  function cur() { return Store.settings().currency; }
+
+  // QR payload = a reference URL back into the system; scanning opens the lot
+  // view, where PROTECTED fields require the password. Sensitive data is NOT
+  // embedded in the QR itself, so a generic scanner reveals only the reference.
+  function qrPayload(lot) {
+    var base = location.origin + location.pathname.replace(/[^/]*$/, '') + 'index.html';
+    return base + '#lot=' + encodeURIComponent(lot.qrId);
+  }
 
   function render(container) {
-    var invoices = Store.all('invoices').slice().sort(function (a, b) { return (b.issueDate || '').localeCompare(a.issueDate || ''); });
-    var right = el('div', { class: 'flex gap-2 flex-wrap' }, [
-      UI.iconBtn('＋ 生成發票', 'primary', function () { generate(container); }),
-      UI.iconBtn('⛰ 階梯價設定', 'ghost', function () { manageTiers(container); })
-    ]);
+    var lots = Store.all('stockLots');
     container.innerHTML = '';
-    container.appendChild(UI.sectionTitle('發票 / 月結', '由訂單生成發票、階梯價（跳bar）、可編輯及列印', right));
+    container.appendChild(UI.sectionTitle('標籤打印', '為入庫貨品列印專屬 QR 標籤（Epson / 標籤機）', el('div', {}, [
+      UI.badge(UI.isUnlocked() ? '🔓 受保護資料已解鎖' : '🔒 受保護資料已鎖', UI.isUnlocked() ? 'ok' : 'muted')
+    ])));
 
     var cols = [
-      { label: '發票號', render: function (v) { return '<b>' + v.invoiceNo + '</b>'; } },
-      { label: '客戶', render: function (v) { var c = customer(v.customerId); return c ? c.name : '—'; } },
-      { label: '類型', render: function (v) { return v.settlementType === 'monthly' ? UI.badge('月結 ' + (v.period || ''), 'info') : UI.badge('單次', 'muted'); } },
-      { label: '開票日', render: function (v) { return UI.fmtDate(v.issueDate); } },
-      { label: '金額', class: 'text-right', render: function (v) { return UI.fmtMoney(invTotal(v), cur()); } },
-      { label: '狀態', render: function (v) { return v.status === 'paid' ? UI.badge('已付', 'ok') : (v.status === 'sent' ? UI.badge('已發出', 'info') : UI.badge('草稿', 'warn')); } },
-      { label: '操作', class: 'text-right whitespace-nowrap', render: function (v) {
+      { label: '批次', render: function (l) { return '<b>' + (l.lotCode || l.qrId) + '</b>'; } },
+      { label: '貨品', render: function (l) { return productName(l.productId); } },
+      { label: '數量', class: 'text-right', render: function (l) { return l.qty + ' ' + (l.unit || ''); } },
+      { label: '到期日', render: function (l) { return UI.fmtDate(l.expiryDate); } },
+      { label: '位置', render: function (l) { return l.storageLocation || '—'; } },
+      { label: '狀態', render: function (l) { return l.status === 'shipped' ? UI.badge('已出貨', 'muted') : UI.badge('在庫', 'ok'); } },
+      { label: '操作', class: 'text-right whitespace-nowrap', render: function (l) {
         return el('div', { class: 'flex gap-2 justify-end' }, [
-          el('button', { class: 'text-terracotta hover:underline text-xs', text: '編輯', onclick: function () { editInvoice(v.id, container); } }),
-          el('button', { class: 'text-indigo hover:underline text-xs', text: '🖨', onclick: function () { printInvoice(v.id); } }),
-          el('button', { class: 'text-red-600 hover:underline text-xs', text: '刪除', onclick: function () { UI.confirmModal('刪除發票 ' + v.invoiceNo + '？', function () { Store.remove('invoices', v.id); render(container); }, { danger: true }); } })
+          el('button', { class: 'text-indigo hover:underline text-xs', text: '預覽', onclick: function () { printLot(l.id); } }),
+          el('button', { class: 'text-terracotta hover:underline text-xs', text: '直接列印', onclick: function () { printLot(l.id, true); } })
         ]);
       } }
     ];
-    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4' }, [UI.table(cols, invoices, { empty: '未有發票。' })]));
+    container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4' }, [UI.table(cols, lots, { empty: '未有批次可列印。' })]));
   }
 
-  function invSubtotal(v) { return (v.lines || []).reduce(function (s, l) { return s + Number(l.qty || 0) * Number(l.unitPrice || 0); }, 0); }
-  function invTotal(v) {
-    var sub = invSubtotal(v);
-    var adj = (v.adjustments || []).reduce(function (s, a) { return s + Number(a.amount || 0); }, 0);
-    return sub + adj;
-  }
+  // build the label DOM. showProtected controls whether sensitive fields print.
+  function buildLabel(lot, showProtected) {
+    var p = product(lot.productId);
+    var s = Store.settings();
+    var svg = QR.toSVG(qrPayload(lot), { ecLevel: 'M', scale: 4, quiet: 2 });
 
-  // ---- Generate invoice from orders --------------------------------------
-  function generate(container) {
-    var customers = Store.all('customers');
-    var body = el('div', {}, [
-      UI.grid(2, [
-        UI.field({ key: 'customerId', label: '客戶', type: 'select', required: true,
-          options: [{ value: '', label: '— 選客戶 —' }].concat(customers.map(function (c) { return { value: c.id, label: c.name + '（' + (c.settlementType === 'monthly' ? '月結' : '單次') + '）' }; })) }),
-        UI.field({ key: 'settlementType', label: '結算方式', type: 'select', options: [{ value: 'per_order', label: '單次結算' }, { value: 'monthly', label: '月結' }] })
+    function rowVisible(k, v) {
+      return el('div', { class: 'lbl-row' }, [el('span', { class: 'lbl-k', text: k }), el('span', { class: 'lbl-v', text: v || '—' })]);
+    }
+    function rowProtected(k, v) {
+      var val = showProtected ? (v || '—') : '••••••';
+      return el('div', { class: 'lbl-row lbl-prot' }, [el('span', { class: 'lbl-k', text: k + ' 🔒' }), el('span', { class: 'lbl-v', text: val })]);
+    }
+
+    var label = el('div', { class: 'dlh-label' }, [
+      el('div', { class: 'lbl-head' }, [
+        el('div', {}, [
+          el('div', { class: 'lbl-co', text: s.companyName }),
+          el('div', { class: 'lbl-code', text: (lot.lotCode || lot.qrId) })
+        ]),
+        el('div', { class: 'lbl-qr', html: svg })
       ]),
-      UI.grid(2, [
-        UI.field({ key: 'period', label: '月結月份', type: 'month', value: new Date().toISOString().slice(0, 7), help: '只適用於月結' }),
-        UI.field({ key: 'issueDate', label: '開票日', type: 'date', value: new Date().toISOString().slice(0, 10) })
+      el('div', { class: 'lbl-name', text: (p ? p.name : lot.productId) + '  ×' + lot.qty + (lot.unit || '') }),
+      // Visible data — delivery address always printed
+      rowVisible('送貨地址', lot.deliveryAddress || s.companyAddress),
+      el('div', { class: 'lbl-grid' }, [
+        rowProtected('入庫', UI.fmtDateTime(lot.inboundTime)),
+        rowProtected('出庫', lot.outboundTime ? UI.fmtDateTime(lot.outboundTime) : '未出'),
+        rowProtected('每盒重量', (lot.weightPerBox != null && lot.weightPerBox !== '' ? lot.weightPerBox + ' kg' : '')),
+        rowProtected('每盒件數', (lot.piecesPerBox != null && lot.piecesPerBox !== '' ? lot.piecesPerBox + ' 件' : '')),
+        rowProtected('保存期至', UI.fmtDate(lot.expiryDate)),
+        rowProtected('存放位置', lot.storageLocation)
       ]),
-      el('p', { class: 'text-xs text-indigo/50 mt-1', text: '會抓取該客戶未開票嘅訂單。階梯價會依客戶合約自動套用，生成後仍可編輯。' })
-    ]);
-    var custSel = body.querySelector('[data-key=customerId]');
-    var setSel = body.querySelector('[data-key=settlementType]');
-    custSel.addEventListener('change', function () { var c = customer(custSel.value); if (c) setSel.value = c.settlementType || 'per_order'; });
-
-    UI.modal({
-      title: '生成發票', width: 'max-w-2xl', body: body,
-      actions: [
-        { label: '取消', kind: 'ghost' },
-        { label: '生成', kind: 'primary', onClick: function (close) {
-          var d = UI.readForm(body);
-          if (!d.customerId) { UI.toast('請選客戶', 'err'); return false; }
-          var c = customer(d.customerId);
-          var tier = c && c.pricingTierId ? Store.get('pricingTiers', c.pricingTierId) : null;
-
-          var orders = Store.all('orders').filter(function (o) {
-            if (o.customerId !== d.customerId) return false;
-            if (o.status === 'invoiced') return false;
-            if (d.settlementType === 'monthly') return (o.deliveryDate || '').slice(0, 7) === d.period;
-            return true;
-          });
-          if (!orders.length) { UI.toast('搵唔到未開票嘅訂單', 'warn'); return false; }
-
-          // Aggregate lines by product across the orders, apply tier pricing
-          var agg = {};
-          orders.forEach(function (o) {
-            (o.lines || []).forEach(function (l) {
-              if (!agg[l.productId]) agg[l.productId] = { productId: l.productId, qty: 0, basePrice: (product(l.productId) || {}).unitPrice || l.unitPrice };
-              agg[l.productId].qty += Number(l.qty || 0);
-            });
-          });
-          var lines = Object.keys(agg).map(function (pid) {
-            var a = agg[pid];
-            var tp = UI.tierPrice(a.basePrice, a.qty, tier);
-            return { productId: pid, qty: a.qty, unitPrice: tp.unit, basePrice: a.basePrice, discountPct: tp.discountPct };
-          });
-
-          var inv = Store.insert('invoices', {
-            invoiceNo: Store.nextSeq('invoice', 'INV'),
-            customerId: d.customerId, settlementType: d.settlementType, period: d.settlementType === 'monthly' ? d.period : '',
-            issueDate: d.issueDate, dueDate: '', status: 'draft',
-            orderIds: orders.map(function (o) { return o.id; }), lines: lines, adjustments: [],
-            tierId: tier ? tier.id : ''
-          });
-          orders.forEach(function (o) { Store.update('orders', o.id, { status: 'invoiced' }); });
-          UI.toast('已生成發票 ' + inv.invoiceNo, 'ok'); close(); editInvoice(inv.id, container);
-        } }
-      ]
-    });
-  }
-
-  // ---- Edit invoice (editable lines + adjustments) -----------------------
-  function editInvoice(invId, container) {
-    var inv = Store.get('invoices', invId);
-    if (!inv) return;
-    var products = Store.all('products');
-    var lines = JSON.parse(JSON.stringify(inv.lines || []));
-    var adjustments = JSON.parse(JSON.stringify(inv.adjustments || []));
-    var tier = inv.tierId ? Store.get('pricingTiers', inv.tierId) : null;
-
-    var linesWrap = el('div', {});
-    var adjWrap = el('div', {});
-    var totWrap = el('div', { class: 'text-right space-y-1 mt-3' });
-
-    function recalc() {
-      var sub = lines.reduce(function (s, l) { return s + Number(l.qty || 0) * Number(l.unitPrice || 0); }, 0);
-      var adj = adjustments.reduce(function (s, a) { return s + Number(a.amount || 0); }, 0);
-      totWrap.innerHTML = '';
-      totWrap.appendChild(el('div', { class: 'text-sm text-indigo/60', text: '小計 Subtotal: ' + UI.fmtMoney(sub, cur()) }));
-      adjustments.forEach(function (a) { totWrap.appendChild(el('div', { class: 'text-sm text-indigo/60', text: (a.label || '調整') + ': ' + UI.fmtMoney(a.amount, cur()) })); });
-      totWrap.appendChild(el('div', { class: 'font-serif text-xl text-indigo', text: '總計 Total: ' + UI.fmtMoney(sub + adj, cur()) }));
-    }
-
-    function drawLines() {
-      linesWrap.innerHTML = '';
-      lines.forEach(function (ln, idx) {
-        var tp = UI.tierPrice(ln.basePrice != null ? ln.basePrice : ln.unitPrice, ln.qty, tier);
-        var row = el('div', { class: 'grid grid-cols-12 gap-2 items-end mb-2' }, [
-          el('div', { class: 'col-span-4' }, [UI.field({ key: 'productId', label: idx === 0 ? '產品' : '', type: 'select',
-            options: [{ value: '', label: '— 選 —' }].concat(products.map(function (p) { return { value: p.id, label: p.name }; })), value: ln.productId })]),
-          el('div', { class: 'col-span-2' }, [UI.field({ key: 'qty', label: idx === 0 ? '數量' : '', type: 'number', value: ln.qty })]),
-          el('div', { class: 'col-span-3' }, [UI.field({ key: 'unitPrice', label: idx === 0 ? '單價(可改)' : '', type: 'number', value: ln.unitPrice })]),
-          el('div', { class: 'col-span-2 text-xs text-indigo/50 pb-2', html: tp.discountPct ? '階梯 -' + tp.discountPct + '%<br>建議 ' + tp.unit : '<span class="text-indigo/30">標準價</span>' }),
-          el('div', { class: 'col-span-1 pb-1 text-right' }, [el('button', { class: 'text-red-600 hover:text-red-800', text: '✕', onclick: function () { lines.splice(idx, 1); drawLines(); } })])
-        ]);
-        var sel = row.querySelector('[data-key=productId]'), qtyI = row.querySelector('[data-key=qty]'), priceI = row.querySelector('[data-key=unitPrice]');
-        sel.addEventListener('change', function () { ln.productId = sel.value; var p = product(sel.value); ln.basePrice = p ? p.unitPrice : ln.unitPrice; var t = UI.tierPrice(ln.basePrice, ln.qty, tier); priceI.value = t.unit; ln.unitPrice = t.unit; drawLines(); });
-        qtyI.addEventListener('input', function () { ln.qty = Number(qtyI.value || 0); recalc(); });
-        priceI.addEventListener('input', function () { ln.unitPrice = Number(priceI.value || 0); recalc(); });
-        linesWrap.appendChild(row);
-      });
-      recalc();
-    }
-    function drawAdj() {
-      adjWrap.innerHTML = '';
-      adjustments.forEach(function (a, idx) {
-        var row = el('div', { class: 'grid grid-cols-12 gap-2 items-end mb-2' }, [
-          el('div', { class: 'col-span-7' }, [UI.field({ key: 'label', label: idx === 0 ? '項目 (折扣/運費/稅)' : '', type: 'text', value: a.label })]),
-          el('div', { class: 'col-span-4' }, [UI.field({ key: 'amount', label: idx === 0 ? '金額(負數=折扣)' : '', type: 'number', value: a.amount })]),
-          el('div', { class: 'col-span-1 pb-1 text-right' }, [el('button', { class: 'text-red-600', text: '✕', onclick: function () { adjustments.splice(idx, 1); drawAdj(); recalc(); } })])
-        ]);
-        row.querySelector('[data-key=label]').addEventListener('input', function (e) { a.label = e.target.value; });
-        row.querySelector('[data-key=amount]').addEventListener('input', function (e) { a.amount = Number(e.target.value || 0); recalc(); });
-        adjWrap.appendChild(row);
-      });
-    }
-
-    var meta = el('div', {}, [
-      UI.grid(3, [
-        UI.field({ key: 'issueDate', label: '開票日', type: 'date', value: inv.issueDate }),
-        UI.field({ key: 'dueDate', label: '到期日', type: 'date', value: inv.dueDate }),
-        UI.field({ key: 'status', label: '狀態', type: 'select', options: [{ value: 'draft', label: '草稿' }, { value: 'sent', label: '已發出' }, { value: 'paid', label: '已付款' }], value: inv.status })
+      el('div', { class: 'lbl-foot' }, [
+        el('span', { text: lot.qrId }),
+        el('span', { text: '篩 ' + (lot.sieveReturned || 0) + '/' + (lot.sieveCount || 0) })
       ])
     ]);
+    return label;
+  }
 
-    var body = el('div', {}, [
-      meta,
-      el('div', { class: 'border-t border-indigo/10 mt-3 pt-3' }, [
-        el('p', { class: 'text-xs font-bold uppercase tracking-wide text-indigo/60 mb-2', text: '項目（單價可自由編輯）' }),
-        linesWrap,
-        el('button', { class: 'text-terracotta hover:underline text-sm', text: '＋ 加項目', onclick: function () { lines.push({ productId: '', qty: 1, unitPrice: 0, basePrice: 0 }); drawLines(); } })
-      ]),
-      el('div', { class: 'border-t border-indigo/10 mt-3 pt-3' }, [
-        el('p', { class: 'text-xs font-bold uppercase tracking-wide text-indigo/60 mb-2', text: '調整（折扣 / 運費 / 稅項）' }),
-        adjWrap,
-        el('button', { class: 'text-terracotta hover:underline text-sm', text: '＋ 加調整', onclick: function () { adjustments.push({ label: '', amount: 0 }); drawAdj(); } })
-      ]),
-      totWrap
-    ]);
-    drawLines(); drawAdj();
+  function printLot(lotId, direct) {
+    var lot = Store.get('stockLots', lotId);
+    if (!lot) { UI.toast('搵唔到批次', 'err'); return; }
+
+    var state = { showProtected: UI.isUnlocked() };
+    var preview = el('div', { class: 'flex justify-center bg-rice-paper p-6' });
+    var toggleWrap = el('div', { class: 'flex items-center gap-2 mb-3' });
+
+    function draw() {
+      preview.innerHTML = '';
+      preview.appendChild(buildLabel(lot, state.showProtected));
+    }
+    function drawToggle() {
+      toggleWrap.innerHTML = '';
+      toggleWrap.appendChild(el('label', { class: 'flex items-center gap-2 text-sm text-indigo cursor-pointer' }, [
+        (function () {
+          var cb = el('input', { type: 'checkbox' });
+          cb.checked = state.showProtected;
+          cb.addEventListener('change', function () {
+            if (cb.checked) {
+              UI.requireUnlock(function () { state.showProtected = true; draw(); drawToggle(); });
+              cb.checked = state.showProtected; // revert until unlocked
+            } else { state.showProtected = false; draw(); drawToggle(); }
+          });
+          return cb;
+        })(),
+        el('span', { text: '在標籤上顯示受保護資料（需密碼）' })
+      ]));
+    }
+
+    var styleEl = labelStyle();
+    var body = el('div', {}, [toggleWrap, preview]);
+    // inject preview style scoped
+    body.appendChild(styleEl.cloneNode(true));
+    drawToggle(); draw();
+
+    function doPrint() {
+      var w = window.open('', '_blank', 'width=480,height=420');
+      var s = Store.settings();
+      w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Label ' + (lot.lotCode || lot.qrId) + '</title>');
+      w.document.write('<style>@page{size:' + s.labelWidthMm + 'mm ' + s.labelHeightMm + 'mm;margin:0;}body{margin:0;}</style>');
+      w.document.write(styleEl.innerHTML.replace('<style>', '').replace('</style>', ''));
+      w.document.write('</head><body>');
+      w.document.write(buildLabel(lot, state.showProtected).outerHTML);
+      w.document.write('</body></html>');
+      w.document.close();
+      w.focus();
+      setTimeout(function () { w.print(); }, 300);
+    }
+
+    if (direct) { doPrint(); return; }
 
     UI.modal({
-      title: '編輯發票 ' + inv.invoiceNo, width: 'max-w-4xl', body: body,
+      title: '標籤預覽 — ' + (lot.lotCode || lot.qrId), width: 'max-w-xl', body: body,
       actions: [
-        { label: '取消', kind: 'ghost' },
-        { label: '🖨 列印', kind: 'ghost', onClick: function (close) { save(); printInvoice(inv.id); } },
-        { label: '儲存', kind: 'primary', onClick: function (close) { save(); UI.toast('已儲存', 'ok'); close(); render(container); } }
+        { label: '關閉', kind: 'ghost' },
+        { label: '🖨 列印標籤', kind: 'primary', onClick: function (close) { doPrint(); } }
       ]
     });
-    function save() {
-      var m = UI.readForm(meta);
-      Store.update('invoices', inv.id, { issueDate: m.issueDate, dueDate: m.dueDate, status: m.status, lines: lines.filter(function (l) { return l.productId; }), adjustments: adjustments });
-    }
   }
 
-  // ---- Tiered pricing (跳bar) manager ------------------------------------
-  function manageTiers(container) {
-    var body = el('div', {});
-    function draw() {
-      var tiers = Store.all('pricingTiers');
-      body.innerHTML = '';
-      body.appendChild(el('p', { class: 'text-sm text-indigo/60 mb-3', text: '階梯價（跳bar）：依訂購數量給予折扣百分比。將階梯指派給客戶後，生成發票時自動套用。' }));
-      tiers.forEach(function (t) {
-        var card = el('div', { class: 'border border-indigo/10 p-3 mb-3' });
-        var bars = el('div', {});
-        function drawBars() {
-          bars.innerHTML = '';
-          (t.tiers || []).forEach(function (b, i) {
-            var row = el('div', { class: 'grid grid-cols-12 gap-2 items-center mb-1' }, [
-              el('div', { class: 'col-span-5 text-sm', html: '數量 ≥ ' }),
-              el('div', { class: 'col-span-3' }, [(function () { var inp = el('input', { class: UI.inputClass(), type: 'number', value: b.minQty }); inp.addEventListener('input', function () { b.minQty = Number(inp.value || 0); }); return inp; })()]),
-              el('div', { class: 'col-span-3' }, [(function () { var inp = el('input', { class: UI.inputClass(), type: 'number', value: b.discountPct, placeholder: '折扣%' }); inp.addEventListener('input', function () { b.discountPct = Number(inp.value || 0); }); return inp; })()]),
-              el('div', { class: 'col-span-1 text-right' }, [el('button', { class: 'text-red-600', text: '✕', onclick: function () { t.tiers.splice(i, 1); drawBars(); } })])
-            ]);
-            bars.appendChild(row);
-          });
-        }
-        drawBars();
-        card.appendChild(el('div', { class: 'flex items-center justify-between mb-2' }, [
-          (function () { var inp = el('input', { class: UI.inputClass() + ' font-bold', value: t.name }); inp.addEventListener('input', function () { t.name = inp.value; }); return inp; })(),
-          el('button', { class: 'text-red-600 hover:underline text-xs ml-2 whitespace-nowrap', text: '刪除階梯', onclick: function () { Store.remove('pricingTiers', t.id); draw(); } })
-        ]));
-        card.appendChild(el('div', { class: 'grid grid-cols-12 gap-2 text-xs text-indigo/50 mb-1' }, [el('div', { class: 'col-span-5', text: '條件' }), el('div', { class: 'col-span-3', text: '最低數量' }), el('div', { class: 'col-span-3', text: '折扣 %' }), el('div', { class: 'col-span-1' })]));
-        card.appendChild(bars);
-        card.appendChild(el('div', { class: 'flex gap-2 mt-2' }, [
-          el('button', { class: 'text-terracotta hover:underline text-sm', text: '＋ 加一級', onclick: function () { t.tiers = t.tiers || []; t.tiers.push({ minQty: 0, discountPct: 0 }); drawBars(); } }),
-          el('button', { class: UI.btnClass('ghost') + ' text-xs', text: '儲存此階梯', onclick: function () { Store.update('pricingTiers', t.id, { name: t.name, tiers: t.tiers }); UI.toast('已儲存', 'ok'); } })
-        ]));
-        body.appendChild(card);
-      });
-      body.appendChild(el('button', { class: UI.btnClass('accent'), text: '＋ 新增階梯價', onclick: function () { Store.insert('pricingTiers', { name: '新階梯價', tiers: [{ minQty: 0, discountPct: 0 }] }); draw(); } }));
-    }
-    draw();
-    UI.modal({ title: '階梯價設定（跳bar）', width: 'max-w-2xl', body: body, actions: [{ label: '完成', kind: 'primary', onClick: function (close) { close(); } }] });
+  function labelStyle() {
+    var s = Store.settings();
+    var css = '<style>' +
+      '.dlh-label{width:' + s.labelWidthMm + 'mm;min-height:' + s.labelHeightMm + 'mm;box-sizing:border-box;padding:3mm;border:1px solid #000;background:#fff;color:#000;font-family:Helvetica,Arial,"Noto Sans TC",sans-serif;font-size:9pt;line-height:1.25;}' +
+      '.lbl-head{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:1.5px solid #000;padding-bottom:1.5mm;margin-bottom:1.5mm;}' +
+      '.lbl-co{font-weight:bold;font-size:9pt;}' +
+      '.lbl-code{font-size:13pt;font-weight:bold;letter-spacing:.5px;}' +
+      '.lbl-qr{width:22mm;height:22mm;}.lbl-qr svg{width:100%;height:100%;display:block;}' +
+      '.lbl-name{font-weight:bold;font-size:10pt;margin-bottom:1mm;}' +
+      '.lbl-row{display:flex;gap:2mm;padding:.3mm 0;}' +
+      '.lbl-k{color:#000;min-width:18mm;font-size:7.5pt;opacity:.75;}' +
+      '.lbl-v{font-size:8.5pt;flex:1;}' +
+      '.lbl-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 3mm;margin-top:1mm;border-top:1px dotted #666;padding-top:1mm;}' +
+      '.lbl-prot .lbl-v{font-family:monospace;}' +
+      '.lbl-foot{display:flex;justify-content:space-between;border-top:1px solid #000;margin-top:1.5mm;padding-top:1mm;font-size:7pt;letter-spacing:.3px;}' +
+      '</style>';
+    var d = document.createElement('div'); d.innerHTML = css; return d.firstChild;
   }
 
-  // ---- Print invoice ------------------------------------------------------
-  function printInvoice(invId) {
-    var inv = Store.get('invoices', invId);
-    if (!inv) return;
-    var s = Store.settings(); var c = customer(inv.customerId) || {};
-    var rows = (inv.lines || []).map(function (l, i) {
-      var p = product(l.productId) || {}; var amt = Number(l.qty || 0) * Number(l.unitPrice || 0);
-      return '<tr><td class="c">' + (i + 1) + '</td><td>' + (p.name || l.productId) + '</td><td class="r">' + l.qty + '</td><td class="r">' + Number(l.unitPrice || 0).toFixed(2) + (l.discountPct ? '<br><small>階梯 -' + l.discountPct + '%</small>' : '') + '</td><td class="r">' + amt.toFixed(2) + '</td></tr>';
-    }).join('');
-    var sub = invSubtotal(inv);
-    var adjRows = (inv.adjustments || []).map(function (a) { return '<tr><td colspan="4" class="r">' + (a.label || '調整') + '</td><td class="r">' + Number(a.amount || 0).toFixed(2) + '</td></tr>'; }).join('');
-    var total = invTotal(inv);
-    var html = '<div class="iv">' +
-      '<div class="iv-head"><div><div class="iv-co">' + s.companyName + '</div><div class="iv-sm">' + (s.companyNameEn || '') + '</div><div class="iv-sm">' + (s.companyAddress || '') + '</div><div class="iv-sm">' + (s.companyPhone || '') + (s.companyBR ? '　BR:' + s.companyBR : '') + '</div></div>' +
-      '<div class="iv-title">發 票<br><span class="iv-title-en">INVOICE</span></div></div>' +
-      '<table class="iv-meta"><tr><td><b>發票號:</b> ' + inv.invoiceNo + '<br><b>客戶:</b> ' + (c.name || '') + '<br>' + (c.address || '') + '</td>' +
-      '<td class="r"><b>開票日:</b> ' + UI.fmtDate(inv.issueDate) + '<br><b>到期日:</b> ' + (UI.fmtDate(inv.dueDate)) + '<br><b>結算:</b> ' + (inv.settlementType === 'monthly' ? '月結 ' + (inv.period || '') : '單次') + '</td></tr></table>' +
-      '<table class="iv-items"><thead><tr><th>#</th><th>貨品 Description</th><th class="r">數量</th><th class="r">單價</th><th class="r">金額</th></tr></thead><tbody>' + rows + '</tbody>' +
-      '<tfoot><tr><td colspan="4" class="r">小計 Subtotal</td><td class="r">' + sub.toFixed(2) + '</td></tr>' + adjRows + '<tr class="grand"><td colspan="4" class="r"><b>總計 TOTAL (' + cur() + ')</b></td><td class="r"><b>' + total.toFixed(2) + '</b></td></tr></tfoot></table>' +
-      '<div class="iv-foot">付款方式 Payment: 支票抬頭「' + s.companyName + '」／銀行轉賬。多謝惠顧。<br>Printed ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + '</div></div>';
-    var css = '<style>body{margin:0;font-family:"Noto Sans TC",Arial,sans-serif;color:#000;}.iv{padding:8mm;}.iv-head{display:flex;justify-content:space-between;border-bottom:2px solid #000;padding-bottom:3mm;}.iv-co{font-size:16pt;font-weight:bold;}.iv-sm{font-size:9pt;}.iv-title{text-align:right;font-size:20pt;font-weight:bold;letter-spacing:3px;}.iv-title-en{font-size:9pt;letter-spacing:2px;}.iv-meta{width:100%;margin-top:3mm;font-size:10pt;}.iv-meta td{vertical-align:top;padding:2mm 0;}.r{text-align:right;}.c{text-align:center;}.iv-items{width:100%;border-collapse:collapse;margin-top:4mm;font-size:10pt;}.iv-items th,.iv-items td{border:1px solid #000;padding:2mm;}.iv-items th{background:#eee;}.iv-items tfoot td{border:1px solid #000;}.grand td{background:#f2f2f2;font-size:11pt;}.iv-foot{margin-top:8mm;font-size:8.5pt;border-top:1px dashed #000;padding-top:2mm;}@page{margin:10mm;}</style>';
-    var w = window.open('', '_blank', 'width=800,height=1000');
-    w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>' + inv.invoiceNo + '</title>' + css + '</head><body>' + html + '</body></html>');
-    w.document.close(); w.focus(); setTimeout(function () { w.print(); }, 350);
+  // Called by the #lot= deep link (scanning the QR) to show protected data.
+  function showLotView(qrId) {
+    var lot = Store.all('stockLots').find(function (l) { return l.qrId === qrId; });
+    if (!lot) { UI.toast('搵唔到此標籤：' + qrId, 'err'); return; }
+    var p = product(lot.productId);
+    function view(unlocked) {
+      var rows = [
+        ['貨品', p ? p.name : lot.productId], ['批次', lot.lotCode || lot.qrId],
+        ['數量', lot.qty + ' ' + (lot.unit || '')], ['送貨地址', lot.deliveryAddress || '—']
+      ];
+      var prot = [
+        ['入庫時間', UI.fmtDateTime(lot.inboundTime)], ['出庫時間', lot.outboundTime ? UI.fmtDateTime(lot.outboundTime) : '未出'],
+        ['每盒重量', lot.weightPerBox ? lot.weightPerBox + ' kg' : '—'], ['每盒件數', lot.piecesPerBox ? lot.piecesPerBox + ' 件' : '—'],
+        ['保存期至', UI.fmtDate(lot.expiryDate)], ['存放位置', lot.storageLocation || '—']
+      ];
+      var body = el('div', {}, [
+        el('div', { class: 'space-y-1 mb-4' }, rows.map(function (r) {
+          return el('div', { class: 'flex justify-between border-b border-indigo/10 py-1 text-sm' }, [el('span', { class: 'text-indigo/60', text: r[0] }), el('span', { class: 'font-medium', text: r[1] })]);
+        })),
+        el('p', { class: 'text-xs font-bold uppercase tracking-wide text-indigo/60 mb-1', text: '🔒 受保護資料' }),
+        unlocked ? el('div', { class: 'space-y-1' }, prot.map(function (r) {
+          return el('div', { class: 'flex justify-between border-b border-indigo/10 py-1 text-sm' }, [el('span', { class: 'text-indigo/60', text: r[0] }), el('span', { class: 'font-medium', text: r[1] })]);
+        })) : el('div', { class: 'text-center py-4' }, [el('button', { class: UI.btnClass('primary'), text: '🔓 輸入密碼查看', onclick: function () { UI.requireUnlock(function () { m.close(); showLotView(qrId); }); } })])
+      ]);
+      var m = UI.modal({ title: '標籤資料 · ' + lot.qrId, width: 'max-w-md', body: body, actions: [{ label: '關閉', kind: 'ghost' }] });
+      return m;
+    }
+    view(UI.isUnlocked());
   }
 
   root.Modules = root.Modules || {};
-  root.Modules.invoices = { id: 'invoices', label: '發票/月結', icon: '💳', render: render, print: printInvoice };
+  root.Modules.labels = { id: 'labels', label: '標籤打印', icon: '🏷️', render: render, printLot: printLot, showLotView: showLotView };
 
 })(typeof window !== 'undefined' ? window : this);
