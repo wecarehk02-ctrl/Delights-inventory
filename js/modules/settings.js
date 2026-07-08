@@ -40,6 +40,33 @@
           UI.field({ key: 'labelWidthMm', label: '標籤闊度', type: 'number', unit: 'mm', value: s.labelWidthMm }),
           UI.field({ key: 'labelHeightMm', label: '標籤高度', type: 'number', unit: 'mm', value: s.labelHeightMm })
         ])
+      ]),
+      card('Epson LQ-615KII 針機', [
+        UI.grid(2, [
+          UI.field({ key: 'dotMatrixModel', label: '針機型號', type: 'text', value: s.dotMatrixModel || 'Epson LQ-615KII' }),
+          UI.field({ key: 'dotMatrixWidth', label: '預設欄寬', type: 'select',
+            options: [{ value: 80, label: '80 欄' }, { value: 96, label: '96 欄' }, { value: 132, label: '132 欄' }],
+            value: s.dotMatrixWidth || 80 })
+        ]),
+        UI.grid(2, [
+          UI.field({ key: 'dotMatrixPrintMode', label: '打印模式', type: 'select',
+            options: [
+              { value: 'browser', label: 'Browser print dialog' },
+              { value: 'bridge', label: 'Local bridge 自動打印' }
+            ],
+            value: s.dotMatrixPrintMode || 'browser',
+            help: 'GitHub Pages 不能靜默打印；要自動打印，請在連住 Epson 的電腦開 local print bridge。' }),
+          UI.field({ key: 'dotMatrixCopies', label: '份數', type: 'number', value: s.dotMatrixCopies || 1, help: 'Local bridge 模式會按此份數送印。' })
+        ]),
+        UI.grid(2, [
+          UI.field({ key: 'dotMatrixPrinterName', label: 'Windows 打印機名稱', type: 'text', value: s.dotMatrixPrinterName || 'EPSON LQ-615KII', help: '要同 Windows「打印機及掃描器」入面名稱一致。' }),
+          UI.field({ key: 'dotMatrixBridgeUrl', label: 'Local bridge URL', type: 'text', value: s.dotMatrixBridgeUrl || 'http://127.0.0.1:8787/print' })
+        ]),
+        el('label', { class: 'flex items-start gap-2 text-sm text-indigo mt-3 cursor-pointer' }, [
+          (function () { var cb = el('input', { type: 'checkbox', class: 'mt-1 h-4 w-4 rounded border-indigo/20 text-terracotta focus:ring-terracotta/20', 'data-key': 'autoPrintDeliveryNote' }); cb.checked = !!s.autoPrintDeliveryNote; return cb; })(),
+          el('span', { text: '儲存訂單後自動打印送貨單（只會喺 Local bridge 模式真正自動打印；Browser 模式會開列印對話框）' })
+        ]),
+        el('p', { class: 'text-xs text-indigo/50 mt-3', text: '建議 Epson LQ-615KII 使用 Windows 原廠/ESC-P2 driver，紙張設定為連續紙，邊界最小。詳情見 PRINT_BRIDGE.md。' })
       ])
     ]);
     container.appendChild(form);

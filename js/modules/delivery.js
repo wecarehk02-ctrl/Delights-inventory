@@ -6,6 +6,10 @@
   function productName(id) { var p = Store.get('products', id); return p ? p.name : id; }
   function product(id) { return Store.get('products', id); }
   function customer(id) { return Store.get('customers', id); }
+  function dotMatrixWidth(width) {
+    var n = Number(width || Store.settings().dotMatrixWidth || 80);
+    return [80, 96, 132].indexOf(n) >= 0 ? n : 80;
+  }
 
   function render(container) {
     var orders = Store.all('orders').slice().sort(function (a, b) { return (b.deliveryDate || '').localeCompare(a.deliveryDate || ''); });
@@ -21,14 +25,15 @@
       { label: '操作', class: 'text-right whitespace-nowrap', render: function (o) {
         return el('div', { class: 'flex gap-2 justify-end' }, [
           el('button', { class: 'text-indigo hover:underline text-xs', text: '預覽', onclick: function () { preview(o.id); } }),
-          el('button', { class: 'text-terracotta hover:underline text-xs', text: '🖨 列印', onclick: function () { doPrint(o.id); } })
+          el('button', { class: 'text-indigo hover:underline text-xs', text: 'HTML 列印', onclick: function () { doPrint(o.id); } }),
+          el('button', { class: 'text-terracotta hover:underline text-xs', text: 'Epson 針機', onclick: function () { printDotMatrix(o.id); } })
         ]);
       } }
     ];
     container.appendChild(el('div', { class: 'bg-white border border-indigo/10 p-4' }, [UI.table(cols, orders, { empty: '未有訂單。' })]));
 
     container.appendChild(el('div', { class: 'mt-4 text-xs text-indigo/50' }, [
-      el('p', { text: '針機提示：於列印對話框選擇 Epson 針機，紙張選「連續紙 / Continuous」或對應尺寸，邊界設為最小。可於「設定」調整公司資料同頁尾。' })
+      el('p', { text: '針機提示：Epson LQ-615KII 可用 Browser print dialog，或於「設定」改用 Local bridge 自動打印。紙張選「連續紙 / Continuous」或對應尺寸，邊界設為最小。' })
     ]));
   }
 
@@ -155,12 +160,63 @@
 
   function printText(orderId, width) {
     var order = Store.get('orders', orderId); if (!order) return;
+    width = dotMatrixWidth(width);
     var txt = noteText(order, width);
     var w = window.open('', '_blank', 'width=780,height=900');
     w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>DN ' + order.orderNo + '</title>' +
       '<style>@page{margin:6mm;}body{margin:0;}pre{font-family:"Courier New",monospace;font-size:10pt;line-height:1.2;white-space:pre;}</style></head><body><pre>' +
       txt.replace(/&/g, '&amp;').replace(/</g, '&lt;') + '</pre></body></html>');
     w.document.close(); w.focus(); setTimeout(function () { w.print(); }, 300);
+  }
+
+  function bridgePrint(order, width) {
+    var s = Store.settings();
+    var url = (s.dotMatrixBridgeUrl || '').trim();
+    if (!url) {
+      return Promise.reject(new Error('未設定 Local bridge URL'));
+    }
+    var payload = {
+      model: s.dotMatrixModel || 'Epson LQ-615KII',
+      printerName: s.dotMatrixPrinterName || 'EPSON LQ-615KII',
+      orderNo: order.orderNo,
+      width: width,
+      copies: Math.max(1, Number(s.dotMatrixCopies || 1)),
+      text: noteText(order, width)
+    };
+    UI.toast('正在送去 Epson 針機...', 'info');
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function (res) {
+      if (!res.ok) throw new Error('Bridge HTTP ' + res.status);
+      return res.json().catch(function () { return {}; });
+    }).then(function () {
+      UI.toast('已送去 Epson 針機', 'ok');
+      return { sent: true };
+    });
+  }
+
+  function printDotMatrix(orderId, width, silentFallback) {
+    var order = Store.get('orders', orderId);
+    if (!order) { UI.toast('搵唔到訂單', 'err'); return Promise.resolve({ sent: false }); }
+    width = dotMatrixWidth(width);
+    var s = Store.settings();
+    if (s.dotMatrixPrintMode === 'bridge') {
+      return bridgePrint(order, width).catch(function (err) {
+        if (!silentFallback) UI.toast('自動打印失敗，改用列印對話框：' + err.message, 'warn');
+        printText(orderId, width);
+        return { sent: false, error: err.message };
+      });
+    }
+    printText(orderId, width);
+    return Promise.resolve({ sent: false, mode: 'browser' });
+  }
+
+  function autoPrint(orderId) {
+    var s = Store.settings();
+    if (!s.autoPrintDeliveryNote) return Promise.resolve({ skipped: true });
+    return printDotMatrix(orderId, s.dotMatrixWidth || 80, true);
   }
 
   function preview(orderId) {
@@ -192,7 +248,7 @@
     UI.modal({
       title: '送貨單預覽 ' + order.orderNo, width: 'max-w-4xl', body: el('div', {}, [toolbar, wrap]),
       actions: [{ label: '關閉', kind: 'ghost' }, { label: '🖨 列印', kind: 'primary', onClick: function (close) {
-        if (mode.type === 'html') doPrint(orderId); else printText(orderId, mode.width);
+        if (mode.type === 'html') doPrint(orderId); else printDotMatrix(orderId, mode.width);
       } }]
     });
   }
@@ -207,6 +263,6 @@
   }
 
   root.Modules = root.Modules || {};
-  root.Modules.delivery = { id: 'delivery', label: '送貨單', icon: '🚚', render: render, print: doPrint, preview: preview };
+  root.Modules.delivery = { id: 'delivery', label: '送貨單', icon: '🚚', render: render, print: doPrint, printDotMatrix: printDotMatrix, autoPrint: autoPrint, preview: preview };
 
 })(typeof window !== 'undefined' ? window : this);

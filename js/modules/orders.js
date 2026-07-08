@@ -165,7 +165,11 @@
             if (shortItems.length) UI.toast('部分貨品庫存不足：' + shortItems.join('、'), 'warn');
             checkReorderAfter();
           }
+          var savedOrderId = o && o.id;
           UI.toast('訂單已儲存', 'ok'); close(); render(container);
+          if (savedOrderId && root.Modules.delivery && root.Modules.delivery.autoPrint) {
+            setTimeout(function () { root.Modules.delivery.autoPrint(savedOrderId); }, 200);
+          }
         } }
       ]
     });

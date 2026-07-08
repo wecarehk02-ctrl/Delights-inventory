@@ -82,6 +82,14 @@ supabase/schema.sql
 
 inside your Supabase SQL editor, then enter Project URL and anon key in the app Settings page.
 
+## Epson LQ-615KII Printing
+
+The delivery-note module supports Epson LQ-615KII dot matrix printing.
+
+- Browser mode opens the normal print dialog.
+- Auto print mode requires the included Windows local bridge in `tools/print-bridge/`.
+- Full setup instructions are in `PRINT_BRIDGE.md`.
+
 ## Important Notes
 
 - The visible page content is rendered by JavaScript into `#inv-main`.

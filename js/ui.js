@@ -124,6 +124,12 @@
     } else if (f.type === 'textarea') {
       input = el('textarea', { id: id, class: inputClass(), rows: f.rows || 3, 'data-key': f.key });
       input.value = f.value == null ? '' : f.value;
+    } else if (f.type === 'checkbox') {
+      input = el('input', {
+        id: id, class: 'h-4 w-4 rounded border-indigo/20 text-terracotta focus:ring-terracotta/20',
+        type: 'checkbox', 'data-key': f.key
+      });
+      input.checked = !!f.value;
     } else {
       input = el('input', {
         id: id, class: inputClass(), type: f.type || 'text', 'data-key': f.key,
@@ -149,6 +155,7 @@
     container.querySelectorAll('[data-key]').forEach(function (inp) {
       var k = inp.getAttribute('data-key');
       var v = inp.value;
+      if (inp.type === 'checkbox') v = inp.checked;
       if (inp.type === 'number') v = v === '' ? '' : Number(v);
       out[k] = v;
     });

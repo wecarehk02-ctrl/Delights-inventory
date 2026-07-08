@@ -170,7 +170,14 @@
     protectPasswordHash: '',       // hash of the label-protection password
     deliveryNoteFooter: '收貨人簽署 / Received by',
     labelWidthMm: 100,
-    labelHeightMm: 70
+    labelHeightMm: 70,
+    dotMatrixModel: 'Epson LQ-615KII',
+    dotMatrixWidth: 80,
+    dotMatrixPrintMode: 'browser',
+    dotMatrixPrinterName: 'EPSON LQ-615KII',
+    dotMatrixBridgeUrl: 'http://127.0.0.1:8787/print',
+    dotMatrixCopies: 1,
+    autoPrintDeliveryNote: false
   };
 
   Store.DEFAULT_SCHEMA = DEFAULT_SCHEMA;
